@@ -1,0 +1,17 @@
+{
+  "model_id": "google/vit-base-patch16-224",
+  "images": {
+    "test_1.jpg": {
+      "expected_label": "cat",
+      "source": "https://commons.wikimedia.org/wiki/Special:FilePath/Cat_August_2010-4.jpg?width=480"
+    },
+    "test_2.jpg": {
+      "expected_label": "husky",
+      "source": "https://raw.githubusercontent.com/pytorch/hub/master/images/dog.jpg"
+    },
+    "test_3.jpg": {
+      "expected_label": "banana",
+      "source": "https://commons.wikimedia.org/wiki/Special:FilePath/Banana-Single.jpg?width=480"
+    }
+  }
+}

@@ -29,6 +29,10 @@ Most small manufacturers can't justify a dedicated on-site AI server just to add
 
 This repository documents that architecture as the reference for implementation.
 
+### Phase 1 prototype
+
+The first executable stage lives in [`robot-cloud-ai/`](robot-cloud-ai/README.md): a Python prototype that sends a local image to a single hosted inference API, validates the prediction, measures round-trip latency, logs every attempt to CSV, and reports success rate separately from prediction accuracy. It is the foundation the reliability and multi-cloud phases build on.
+
 ## Features
 
 - **Hybrid inference routing** — prefers local GPU compute when available, falls back to cloud automatically
@@ -97,6 +101,7 @@ robotic-hand/
 ├── broker_config/         # MQTT broker configuration
 ├── inference/             # model code shared by local + cloud paths
 ├── config/                # example configuration files
+├── robot-cloud-ai/        # phase 1 Python prototype (single cloud provider)
 └── docs/                  # additional design notes
 ```
 
