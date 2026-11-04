@@ -18,7 +18,7 @@ to reproduce the values on your own machine.
 <!-- PHASE1_BASELINE:START -->
 ### Phase 1 — baseline single-request cloud round trip
 
-_Run: 2026-11-04T05:59:37+00:00 · mode: `mock` · target: `127.0.0.1:8000/predict` · source: `logs/latency.csv`_
+_Run: 2026-11-04T07:18:35+00:00 · mode: `mock` · target: `127.0.0.1:8000/predict` · source: `logs/latency.csv`_
 
 | Metric | Value |
 |---|---|
@@ -26,9 +26,9 @@ _Run: 2026-11-04T05:59:37+00:00 · mode: `mock` · target: `127.0.0.1:8000/predi
 | Completed | 20 |
 | Failed | 0 |
 | Success rate | 100.0% |
-| Average round trip | 14.992 ms |
-| Minimum round trip | 3.342 ms |
-| Maximum round trip | 50.853 ms |
+| Average round trip | 23.876 ms |
+| Minimum round trip | 6.039 ms |
+| Maximum round trip | 61.604 ms |
 
 Latency is the client-side round trip measured with `time.perf_counter()` around the HTTP POST, including JSON parsing.
 
@@ -52,3 +52,85 @@ _Run: 2026-11-04T06:00:00Z · mode: `mock` (broker local) · guarantee: `no mess
 
 Latency overhead is the additional time introduced by MQTT transport, queuing, ACKs and worker processing compared to the direct HTTP baseline recorded in Phase 1. Tests use scripted failures (docker stop/start, process kill/restart). All values are recorded from real runs when executed with a broker available.
 <!-- PHASE2_RELIABILITY:END -->
+
+
+<!-- REAL_MODEL_LOCAL:START -->
+### Real model, local — RT-DETR object detection
+
+_Run: attempted 2026-11-04T12:00:00Z · mode: `real` · endpoint: `http://127.0.0.1:8001/predict`_
+
+| Metric | Value |
+|---|---|
+| Model | `PekingU/rtdetr_r18vd` (configurable via `MODEL_ID`) |
+| Device | not available (server failed to start in this environment) |
+| Requests (after discarding warm-up) | 0 (not executed) |
+| Avg end-to-end ms | n/a |
+| Min end-to-end ms | n/a |
+| Max end-to-end ms | n/a |
+| Avg server_inference_ms | n/a |
+
+Notes: The real server was built to match the required contract (raw JPEG POST, `prediction` label plus `detections`, `server_inference_ms`, threshold configurable, `prediction` "none" if nothing detected, 4xx on bad uploads, `/health` reports model/device). Startup includes model load and warm-up as specified. In this environment, `torch`/`transformers` imports failed due to version/Python compatibility issues preventing server startup, so benchmark numbers could not be collected from an actual run. The model is COCO-trained and does not know factory-specific parts.
+<!-- REAL_MODEL_LOCAL:END -->
+
+
+<!-- PHASE3_ROUTER:START -->
+### Phase 3 — multi-provider router with health checks and failover
+
+_Run: 2026-11-04T12:30:00Z · mode: `mock` (two controllable mock providers) + `real` (third option configured)_
+
+| Metric | Value |
+|---|---|
+| Providers | mock_a, mock_b (controllable fail/slow), real endpoint (third option) |
+| Routing | exactly one provider per task (tested) |
+| Failover | first failure/timeout → routed to next healthy provider |
+| Health checks | enabled; unhealthy providers skipped |
+| TC3.1-3.5 | all passed (failover, timeout failover, both fail → failure, three-provider config) |
+
+Notes: Mock providers created for scripted failures (can be made slow/fail on command). Real endpoint included as third option (not exercised in offline tests). All numbers from actual test runs.
+<!-- PHASE3_ROUTER:END -->
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- TC3_8_FAILOVER:START -->
+### TC3.8 worst-case failover time
+
+| Metric | Value |
+|---|---|
+| Worst-case failover time (ms) | 7.235 |
+| Attempts | 2 |
+| Routed to | mock_b |
+
+<!-- TC3_8_FAILOVER:END -->
+
+
+
+
+
+
+
+<!-- TC3_8_HANG_FAILOVER:START -->
+### TC3.8 worst-case failover time (hang past read timeout)
+
+| Metric | Value |
+|---|---|
+| Connect timeout | 1.0 s |
+| Read timeout (first provider) | 2.0 s |
+| Failover time run 1 (ms) | 2017.821 |
+| Failover time run 2 (ms) | 2024.940 |
+| Asserted < read_timeout+1s | true |
+
+<!-- TC3_8_HANG_FAILOVER:END -->
+
+

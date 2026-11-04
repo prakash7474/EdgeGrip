@@ -128,14 +128,17 @@ class CloudClient:
         self,
         endpoint: str,
         *,
-        timeout_seconds: float = 10.0,
+        timeout_seconds: float | tuple[float, float] = 10.0,
         api_key: str = "",
         session: requests.Session | None = None,
     ) -> None:
         if not endpoint.startswith(("http://", "https://")):
             raise ValueError("endpoint must start with http:// or https://")
         self.endpoint = endpoint
-        self.timeout_seconds = float(timeout_seconds)
+        if isinstance(timeout_seconds, (tuple, list)):
+            self.timeout_seconds = (float(timeout_seconds[0]), float(timeout_seconds[1]))
+        else:
+            self.timeout_seconds = float(timeout_seconds)
         self._api_key = api_key
         self._session = session or requests.Session()
         self._owns_session = session is None

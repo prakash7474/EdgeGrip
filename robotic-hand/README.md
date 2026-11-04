@@ -15,7 +15,7 @@ retry, no queue, no broker and no multi-provider routing yet.
 |---|---|---|
 | **1** | Baseline edge → cloud pipeline with measured latency | **Complete** |
 | **2** | Reliable delivery: MQTT (Mosquitto), SQLite outbox, QoS 1, ACKs, retries with backoff, dedup | **Complete (tests written, broker-dependent)** |
-| 3 | Multi-provider router with health checks and failover | Not started |
+| **3** | Multi-provider router with health checks and failover | **Complete** |
 | 4 | End-to-end task IDs, first-valid-answer-wins | Not started |
 | 5 | Robot hardware integration | Not started |
 
@@ -309,3 +309,16 @@ called, so no real-network latency is claimed.
 Phase 2 adds reliable delivery: a Mosquitto broker via `docker-compose.yml`, a
 SQLite outbox written before every send, MQTT QoS 1, ACK-driven `acked` state,
 exponential backoff and restart recovery. It is intentionally not built yet.
+
+
+## Phase 3: Multi-provider router
+
+- **Router**: `phase3_router/router.py` routes each task to **exactly one provider**. Health checks skip unhealthy providers; on failure/timeout it fails over to the next in order.
+- **Providers**: `phase3_router/providers/` includes HTTP adapter and two controllable mock providers (`mock_provider_a`, `mock_provider_b`) that can be made slow or fail on command (via control endpoints/env) for scripted tests. **Real endpoint** included as a third option.
+- **Tests**: `tests/phase3/test_tc3_router.py` (TC3.1–TC3.5) cover healthy routing, failover on failure, failover on timeout, both providers fail, and three-provider configuration including real endpoint.
+
+```bash
+python -m pytest tests/phase3 -v
+```
+
+Results recorded in `docs/measurements.md` under Phase 3 (mock vs real labelled).

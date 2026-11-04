@@ -1,9 +1,10 @@
 """Cloud worker: subscribes to frames, deduplicates by message_id in processed_ids,
-skips duplicates but re-sends ACK, calls Phase 1 client to get prediction, publishes result and ACK."""
+skips duplicates but re-sends ACK, uses Router for multi-provider inference, publishes result and ACK."""
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -14,6 +15,7 @@ import paho.mqtt.client as mqtt
 from phase1_pipeline.client import CloudClient
 from phase2_reliability.common import Message, base64_to_jpeg
 from phase2_reliability.config import Settings, load_settings
+from phase3_router import Router, HTTPProvider
 
 LOG = logging.getLogger("phase2.worker")
 
@@ -61,7 +63,9 @@ class ProcessedDB:
 
 
 class Worker:
-    def __init__(self, settings: Settings | None = None, inference_endpoint: str | None = None, inference_api_key: str = ""):
+    def __init__(self, settings: Settings | None = None, inference_endpoint: str | None = None,
+                 inference_api_key: str = "", router: Router | None = None,
+                 provider_endpoints: list[str] | None = None):
         self.settings = settings or load_settings()
         self.processed = ProcessedDB(self.settings.processed_db)
         try:
@@ -74,8 +78,29 @@ class Worker:
         self.inference_endpoint = inference_endpoint
         self.inference_api_key = inference_api_key
         self.cloud_client = None
+        self.router = router
+        self.provider_endpoints = provider_endpoints
+
+    def _build_router(self):
+        if self.router is not None:
+            return self.router
+        endpoints = self.provider_endpoints
+        if not endpoints:
+            # try env
+            eps = os.getenv("ROUTER_ENDPOINTS")
+            if eps:
+                endpoints = [e.strip() for e in eps.split(",") if e.strip()]
+        if not endpoints and self.inference_endpoint:
+            endpoints = [self.inference_endpoint]
+        if not endpoints:
+            endpoints = ["http://127.0.0.1:8000/predict"]
+        providers = [HTTPProvider(f"p{i}", ep, api_key=self.inference_api_key) for i, ep in enumerate(endpoints)]
+        from phase3_router.config import get_recheck_interval_sec
+        self.router = Router(providers, recheck_interval_sec=get_recheck_interval_sec())
+        return self.router
 
     def start(self):
+        self._build_router()
         self.cloud_client = CloudClient(self.inference_endpoint or "http://127.0.0.1:8000/predict", api_key=self.inference_api_key)
         self.client.connect(self.settings.broker_host, self.settings.broker_port, 60)
         self.client.loop_start()
@@ -110,26 +135,24 @@ class Worker:
             if self.processed.is_processed(message.message_id):
                 LOG.info("Duplicate %s - skipped processing, ACK resent", message.message_id)
                 return
-            # Process: call Phase 1 client
+            # Process: use Router
             jpeg = base64_to_jpeg(message.payload)
-            if self.cloud_client is None:
-                # create if not set
-                self.cloud_client = CloudClient(self.inference_endpoint or "http://127.0.0.1:8000/predict")
-            result = self.cloud_client.predict(jpeg, image_name=f"mqtt:{message.message_id}")
+            router = self._build_router()
+            rres = router.predict(jpeg)
             result_dict = {
                 "message_id": message.message_id,
-                "ok": result.ok,
-                "label": result.label,
-                "latency_ms": result.latency_ms,
-                "status_code": result.status_code,
+                "ok": rres.ok,
+                "label": rres.label,
+                "provider": rres.provider,
+                "latency_ms": rres.latency_ms,
+                "attempts": rres.attempts,
             }
             self.processed.mark_processed(message.message_id, json.dumps(result_dict))
-            # publish result
             try:
                 self.client.publish(self.settings.topic_result, json.dumps(result_dict), qos=1)
             except Exception:
                 pass
-            LOG.info("Processed %s -> %s", message.message_id, result.label if result.ok else result.error_kind)
+            LOG.info("Processed %s -> %s via %s", message.message_id, rres.label if rres.ok else "fail", rres.provider)
         except Exception as e:
             LOG.warning("Worker error: %s", e)
 

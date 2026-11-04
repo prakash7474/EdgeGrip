@@ -22,3 +22,9 @@ logs/*.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# Phase 2/3 runtime data
+phase2_reliability/*.db
+*.db
+mosquitto/data/
+mosquitto/log/
