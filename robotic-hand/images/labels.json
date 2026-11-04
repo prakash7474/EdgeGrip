@@ -1,0 +1,17 @@
+{
+  "description": "Sample camera frames used when no physical camera is attached. The mock inference server maps the SHA-256 of each file to its expected label, so tests are deterministic and offline.",
+  "images": {
+    "cat.jpg": {
+      "expected_label": "cat",
+      "source": "https://commons.wikimedia.org/wiki/Special:FilePath/Cat_August_2010-4.jpg?width=480"
+    },
+    "dog.jpg": {
+      "expected_label": "dog",
+      "source": "https://raw.githubusercontent.com/pytorch/hub/master/images/dog.jpg"
+    },
+    "banana.jpg": {
+      "expected_label": "banana",
+      "source": "https://commons.wikimedia.org/wiki/Special:FilePath/Banana-Single.jpg?width=480"
+    }
+  }
+}

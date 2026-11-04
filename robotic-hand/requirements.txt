@@ -1,0 +1,9 @@
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
+opencv-python>=4.9,<6
+numpy>=1.26
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+pytest>=8.0,<10
+paho-mqtt>=1.6,<2
+Pillow>=10.0,<12
