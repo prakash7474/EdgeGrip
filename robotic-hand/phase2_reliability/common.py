@@ -21,6 +21,14 @@ class Message:
     message_id: str
     created_at: str
     payload: str  # base64 JPEG
+    # Phase 4 task context (backward compatible)
+    attempt: int = 1
+    frame_timestamp: str = ""
+    deadline: float = 0.0
+
+    @property
+    def task_id(self) -> str:
+        return self.message_id
 
     def to_json(self) -> str:
         return json.dumps(asdict(self))
@@ -30,7 +38,14 @@ class Message:
         if isinstance(data, bytes):
             data = data.decode("utf-8")
         obj = json.loads(data)
-        return cls(message_id=obj["message_id"], created_at=obj["created_at"], payload=obj["payload"])
+        return cls(
+            message_id=obj["message_id"],
+            created_at=obj["created_at"],
+            payload=obj["payload"],
+            attempt=int(obj.get("attempt", 1) or 1),
+            frame_timestamp=str(obj.get("frame_timestamp", "") or ""),
+            deadline=float(obj.get("deadline", 0.0) or 0.0),
+        )
 
 
 def now_iso() -> str:

@@ -108,13 +108,13 @@ def _inspect(body: bytes) -> tuple[int, int] | None:
     return int(width), int(height)
 
 
-def build_response(body: bytes, index: KnownImageIndex) -> dict[str, Any]:
+def build_response(body: bytes, index: KnownImageIndex, task_id: str | None = None) -> dict[str, Any]:
     """Build the deterministic response for one request body."""
     digest = sha256_hex(body)
     known_label = index.label_for(digest)
     label = known_label or _fallback_label(digest)
     width, height = _inspect(body) or (0, 0)
-    return {
+    resp: dict[str, Any] = {
         "label": label,
         "confidence": _confidence(digest, known_label is not None),
         "model": MODEL_ID,
@@ -124,6 +124,9 @@ def build_response(body: bytes, index: KnownImageIndex) -> dict[str, Any]:
         "image_height": height,
         "mock": True,
     }
+    if task_id:
+        resp["task_id"] = task_id
+    return resp
 
 
 def create_app(images_dir: Path | None = None) -> FastAPI:
@@ -163,13 +166,19 @@ def create_app(images_dir: Path | None = None) -> FastAPI:
         """Liveness probe used by tests and the README workflow."""
         return {"status": "ok", "model": MODEL_ID, "known_images": index.count}
 
+    def _task_id(request: Request) -> str | None:
+        tid = request.headers.get("x-task-id") or request.headers.get("X-Task-Id")
+        return str(tid) if tid else None
+
     @app.post("/predict")
     async def predict(request: Request) -> JSONResponse:
         """Classify one raw JPEG and return a deterministic label."""
         body = await _read_body(request)
         if isinstance(body, JSONResponse):
             return body
-        return JSONResponse(status_code=200, content=build_response(body, index))
+        tid = _task_id(request)
+        headers = {"X-Task-Id": tid} if tid else {}
+        return JSONResponse(status_code=200, content=build_response(body, index, task_id=tid), headers=headers)
 
     @app.post("/predict/slow")
     async def predict_slow(
@@ -180,8 +189,10 @@ def create_app(images_dir: Path | None = None) -> FastAPI:
         body = await _read_body(request)
         if isinstance(body, JSONResponse):
             return body
+        tid = _task_id(request)
         await asyncio.sleep(delay_ms / 1000.0)
-        return JSONResponse(status_code=200, content=build_response(body, index))
+        headers = {"X-Task-Id": tid} if tid else {}
+        return JSONResponse(status_code=200, content=build_response(body, index, task_id=tid), headers=headers)
 
     return app
 

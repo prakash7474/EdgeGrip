@@ -2,8 +2,8 @@
   <rect width="1200" height="300" fill="#14171C"/>
 
   <text x="72" y="130" font-family="Arial, Helvetica, sans-serif" font-size="56" font-weight="700" fill="#F2F0EA">Robotic Hand</text>
-  <text x="74" y="178" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="500" fill="#E8963C">Edge/cloud AI pipeline for industrial robotics</text>
-  <text x="74" y="214" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="#9AA0A8">Camera + sensors &#8594; local or cloud decision &#8594; actuation</text>
+  <text x="74" y="178" font-family="Arial, Helvetica, sans-serif" font-size="22" font-weight="500" fill="#E8963C">Reliable edge/cloud AI for industrial robotics</text>
+  <text x="74" y="214" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="#9AA0A8">Phases 1&#8211;4: delivery &#183; multi-provider routing &#183; conflict-safe decisions</text>
 
   <!-- network / node motif, echoes the architecture diagram -->
   <line x1="820" y1="100" x2="930" y2="70" stroke="#2E333C" stroke-width="2"/>

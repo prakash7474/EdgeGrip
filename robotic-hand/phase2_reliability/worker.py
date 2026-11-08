@@ -65,9 +65,12 @@ class ProcessedDB:
 class Worker:
     def __init__(self, settings: Settings | None = None, inference_endpoint: str | None = None,
                  inference_api_key: str = "", router: Router | None = None,
-                 provider_endpoints: list[str] | None = None):
+                 provider_endpoints: list[str] | None = None,
+                 conflict_store=None, decision_gate=None):
         self.settings = settings or load_settings()
         self.processed = ProcessedDB(self.settings.processed_db)
+        self.conflict_store = conflict_store
+        self.decision_gate = decision_gate
         try:
             self.client = mqtt.Client(client_id=f"worker-{int(time.time())}", protocol=mqtt.MQTTv311)
         except Exception:
@@ -83,6 +86,11 @@ class Worker:
 
     def _build_router(self):
         if self.router is not None:
+            if self.conflict_store is not None and getattr(self.router, "conflict_store", None) is None:
+                try:
+                    self.router.conflict_store = self.conflict_store
+                except Exception:
+                    pass
             return self.router
         endpoints = self.provider_endpoints
         if not endpoints:
@@ -96,7 +104,7 @@ class Worker:
             endpoints = ["http://127.0.0.1:8000/predict"]
         providers = [HTTPProvider(f"p{i}", ep, api_key=self.inference_api_key) for i, ep in enumerate(endpoints)]
         from phase3_router.config import get_recheck_interval_sec
-        self.router = Router(providers, recheck_interval_sec=get_recheck_interval_sec())
+        self.router = Router(providers, recheck_interval_sec=get_recheck_interval_sec(), conflict_store=self.conflict_store)
         return self.router
 
     def start(self):
@@ -126,6 +134,86 @@ class Worker:
         else:
             LOG.warning("Worker connect rc=%s", rc)
 
+    def process_message(self, message: Message) -> dict:
+        """Run inference, claim the result and pass it through the decision gate.
+
+        Side-effect free with respect to delivery bookkeeping: it does not mark
+        the message processed and does not publish an ACK. ``_on_message`` adds
+        those steps, which lets tests model a crash between this work and the
+        delivery acknowledgement without duplicating the logic.
+        """
+        task_context = {
+            "task_id": message.message_id,
+            "attempt": getattr(message, "attempt", 1) or 1,
+            "frame_timestamp": getattr(message, "frame_timestamp", "") or "",
+            "deadline": float(getattr(message, "deadline", 0.0) or 0.0),
+        }
+        # Timeout path: if deadline passed, safe default; later answer logged as late and never applied
+        now = time.time()
+        if task_context["deadline"] and now > task_context["deadline"]:
+            # The gate records this late discard when present; record it here only
+            # when there is no gate, so one late event produces one discard row.
+            if self.conflict_store is not None and self.decision_gate is None:
+                try:
+                    self.conflict_store.record_discard(message.message_id, "worker", "late")
+                except Exception:
+                    pass
+            result_dict = {
+                "message_id": message.message_id,
+                "task_id": message.message_id,
+                "ok": True,
+                "label": "safe_default",
+                "provider": "timeout",
+                "decision": "safe_default",
+                "attempts": 0,
+                "late": True,
+            }
+            if self.decision_gate is not None:
+                try:
+                    self.decision_gate.try_apply(message.message_id, "safe_default", task_context["frame_timestamp"], task_context["deadline"], now=now)
+                except Exception:
+                    pass
+            return result_dict
+        jpeg = base64_to_jpeg(message.payload)
+        router = self._build_router()
+        rres = router.predict(jpeg, task_context=task_context)
+        # if arrived after deadline (took too long), treat as late
+        now2 = time.time()
+        if task_context["deadline"] and now2 > task_context["deadline"]:
+            if self.conflict_store is not None and self.decision_gate is None:
+                try:
+                    self.conflict_store.record_discard(message.message_id, rres.provider, "late")
+                except Exception:
+                    pass
+            decision = "safe_default"
+            # do not apply late answer
+        else:
+            decision = rres.label if rres.ok else "safe_default"
+            # claim result (first writer wins) if store present
+            if self.conflict_store is not None and rres.ok:
+                try:
+                    claimed = self.conflict_store.claim_result(message.message_id, rres.provider, decision or "")
+                    if not claimed:
+                        self.conflict_store.record_discard(message.message_id, rres.provider, "duplicate")
+                except Exception:
+                    pass
+        result_dict = {
+            "message_id": message.message_id,
+            "task_id": message.message_id,
+            "ok": rres.ok,
+            "label": rres.label,
+            "decision": decision,
+            "provider": rres.provider,
+            "latency_ms": rres.latency_ms,
+            "attempts": rres.attempts,
+        }
+        if self.decision_gate is not None:
+            try:
+                self.decision_gate.try_apply(message.message_id, decision, task_context["frame_timestamp"], task_context["deadline"])
+            except Exception:
+                pass
+        return result_dict
+
     def _on_message(self, client, userdata, msg):
         try:
             payload = msg.payload.decode("utf-8")
@@ -134,25 +222,19 @@ class Worker:
             self._send_ack(message.message_id)
             if self.processed.is_processed(message.message_id):
                 LOG.info("Duplicate %s - skipped processing, ACK resent", message.message_id)
+                if self.conflict_store is not None:
+                    try:
+                        self.conflict_store.record_discard(message.message_id, "worker", "duplicate")
+                    except Exception:
+                        pass
                 return
-            # Process: use Router
-            jpeg = base64_to_jpeg(message.payload)
-            router = self._build_router()
-            rres = router.predict(jpeg)
-            result_dict = {
-                "message_id": message.message_id,
-                "ok": rres.ok,
-                "label": rres.label,
-                "provider": rres.provider,
-                "latency_ms": rres.latency_ms,
-                "attempts": rres.attempts,
-            }
+            result_dict = self.process_message(message)
             self.processed.mark_processed(message.message_id, json.dumps(result_dict))
             try:
                 self.client.publish(self.settings.topic_result, json.dumps(result_dict), qos=1)
             except Exception:
                 pass
-            LOG.info("Processed %s -> %s via %s", message.message_id, rres.label if rres.ok else "fail", rres.provider)
+            LOG.info("Processed %s -> %s via %s", message.message_id, result_dict.get("decision"), result_dict.get("provider"))
         except Exception as e:
             LOG.warning("Worker error: %s", e)
 

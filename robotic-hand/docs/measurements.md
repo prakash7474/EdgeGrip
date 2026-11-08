@@ -103,12 +103,18 @@ Notes: Mock providers created for scripted failures (can be made slow/fail on co
 
 
 
+
+
+
+
+
+
 <!-- TC3_8_FAILOVER:START -->
 ### TC3.8 worst-case failover time
 
 | Metric | Value |
 |---|---|
-| Worst-case failover time (ms) | 7.235 |
+| Worst-case failover time (ms) | 4.338 |
 | Attempts | 2 |
 | Routed to | mock_b |
 
@@ -120,17 +126,113 @@ Notes: Mock providers created for scripted failures (can be made slow/fail on co
 
 
 
+
+
+
+
+
+
+
+
 <!-- TC3_8_HANG_FAILOVER:START -->
-### TC3.8 worst-case failover time (hang past read timeout)
+### TC3.8 hanging-provider failover (5 runs, measured)
+
+Bound per run = connect_timeout (1.0s) + read_timeout (2.0s)
++ one failover call (measured) + fixed slack (0.3s).
+
+| Run | Total ms | Bound ms | A call ms | B call ms (failover) | Connect ms | Breaker check ms | Health ms (off path) |
+|---|---|---|---|---|---|---|---|
+| 1 | 2015.4 | 3307.3 | 2008.0 | 7.3 | 0.74 | 0.0049 | 4.4 |
+| 2 | 2023.1 | 3306.0 | 2017.1 | 6.0 | 0.73 | 0.0049 | 4.0 |
+| 3 | 2007.7 | 3306.6 | 2001.0 | 6.6 | 0.86 | 0.0052 | 4.4 |
+| 4 | 2015.5 | 3307.0 | 2008.4 | 7.0 | 0.76 | 0.0038 | 3.1 |
+| 5 | 2010.5 | 3307.0 | 2003.4 | 7.0 | 0.74 | 0.0034 | 3.4 |
 
 | Metric | Value |
 |---|---|
-| Connect timeout | 1.0 s |
-| Read timeout (first provider) | 2.0 s |
-| Failover time run 1 (ms) | 2017.821 |
-| Failover time run 2 (ms) | 2024.940 |
-| Asserted < read_timeout+1s | true |
+| min total | 2007.7 ms |
+| median total | 2015.4 ms |
+| max total | 2023.1 ms |
+| retries observed | 0 (one call per provider) |
+| sleeps on the request path | 0 |
+| health checks | background thread, not on the request path |
 
+Breakdown of the earlier 4028 ms regression: ~2000 ms first read timeout, ~2000 ms an
+accidental second call to the same hanging provider (Router caught the provider's
+internal `TypeError` and retried), ~7 ms failover call, ~0 ms connect and breaker
+checks. Fixed by making `CloudClient` format a tuple timeout correctly and by
+choosing `task_context`/`timeout` kwargs via `inspect.signature` instead of
+`except TypeError`.
 <!-- TC3_8_HANG_FAILOVER:END -->
 
 
+
+
+
+<!-- TC4_RESULTS:START -->
+### Phase 4 (TC4.1-TC4.12) conflict handling
+
+| Metric | Value |
+|---|---|
+| TC4.5 trials (two responses through the real worker claim path, random jitter) | 200 |
+| TC4.5 violations (a trial without exactly one result and one applied decision) | 0 |
+| TC4.5 duplicate discards (one per losing response) | 200 |
+| TC4.8 | see the TC4.8 block below; injected faults are labelled there |
+| TC4.9 | see the TC4.9 block below |
+| TC4.1-TC4.4, TC4.6, TC4.7, TC4.10-TC4.12 | passed (see test docstrings for the spec mapping) |
+| Invariant violations found | 0 |
+
+Injected expired deadlines in TC4.8 are reported there as injected faults, not as a
+late-answer rate. No organic late-answer rate is claimed for TC4.8 because the
+expired deadlines were configured by the test.
+<!-- TC4_RESULTS:END -->
+
+<!-- TC4_9_DEADLINE_TIMEOUT:START -->
+### TC4.9 deadline-derived attempt timeout (A hangs, B healthy, deadline 1.5 s)
+
+| Group | Tasks | Success | Notes |
+|---|---|---|---|
+| first 20 after A starts hanging (breaker closed) | 20 | 100% | A gets ~750 ms (1.5 s / 2 providers), B gets the rest |
+| first 20 after the breaker opened | 20 | 100% | A skipped, B answers immediately |
+
+Group 1 measured attempt budgets: [749.947, 749.972, 749.977, 749.983, 749.984, 749.985, 749.986, 749.987, 749.988, 749.989, 749.99, 749.991, 749.992, 898.197, 901.591, 911.479, 920.121, 921.89, 926.931, 927.406, 928.282, 928.29, 929.176, 929.327, 929.894, 930.125, 930.249, 930.285, 930.553, 930.665, 931.174, 931.214, 931.339] ms
+Group 1 elapsed: min 573 / median 577 / max 607 ms
+Group 2 elapsed: min 4 / median 5 / max 6 ms
+<!-- TC4_9_DEADLINE_TIMEOUT:END -->
+
+<!-- TC4_8_FULL_WORKER:START -->
+### TC4.8 (rewritten) 1000 tasks through worker + router + gate
+
+Injected (configured by the test, not observed rates):
+- random provider 500s: fail_p=0.15 on each of 2 providers
+- random provider delays: slow_p=0.15, delay uniform 0-250 ms (some exceed the per-attempt budget)
+- duplicate deliveries: 15% of tasks delivered twice (173 extra deliveries)
+- expired deadlines: 10% of tasks (109 tasks) - injected, NOT a late rate
+
+Observed outcomes:
+| Outcome | Count |
+|---|---|
+| applied (model decision) | 864 |
+| applied safe_default (organic provider failure before deadline) | 27 |
+| safe_default from injected expired deadline (not applied) | 109 |
+| failed (no decision; organic) | 0 |
+| total tasks | 1000 |
+| applied more than once | 0 |
+
+Observed discards:
+| Reason | Count |
+|---|---|
+| late (from injected expired deadlines) | 109 |
+| late (organic) | 0 |
+| duplicate | 173 |
+| mismatch | 0 |
+
+Injected provider counters (from mock /control/stats):
+- HTTP 500 responses: 142
+- delayed responses: 146
+
+Organic observations:
+- late discards not attributable to injected expired deadlines: 0
+- client-side timeouts are not separately counted by the mock; they appear as failed attempts and, when both providers fail, as safe_default decisions.
+- injected expired deliveries (including duplicates): 130
+<!-- TC4_8_FULL_WORKER:END -->

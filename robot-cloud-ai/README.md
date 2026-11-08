@@ -5,7 +5,9 @@ send it to **one** hosted AI inference API, validate the prediction, measure
 round-trip latency, and record every attempt — successes and failures — to CSV.
 
 This is the executable Phase 1 slice of the larger [robotic hand project](../README.md).
-Multi-cloud routing, retries and buffering are deliberately **out of scope**.
+Multi-cloud routing, retries and buffering are deliberately **out of scope here**;
+those phases are implemented and tested in [`../robotic-hand/`](../robotic-hand/README.md), which
+is the current pipeline. This folder is kept as the original single-provider prototype.
 
 | Item | Value |
 |---|---|
@@ -352,7 +354,9 @@ python main.py all
 - **Single provider.** Phase 1 intentionally talks only to Hugging Face. The
   provider adapter exists so Phase 3 can add others, but no routing exists yet.
 - **No delivery guarantees.** A request is one HTTP POST. There is no retry,
-  no local buffer, no acknowledgement and no idempotency — Phase 2 and 4 scope.
+  no local buffer, no acknowledgement and no idempotency. Those guarantees are
+  implemented in [`../robotic-hand/`](../robotic-hand/README.md) (Phases 2–4);
+  they are out of scope for this prototype.
 - **Best-effort request only.** A timeout is logged and abandoned; the task is
   not requeued.
 - **Small accuracy sample.** Accuracy comes from whatever labelled images are
@@ -369,14 +373,16 @@ python main.py all
 
 Phase 1 (this folder) is the baseline for:
 
-- **Phase 2 — Reliable communication:** persistent local task buffer,
-  acknowledgements, bounded retries with backoff, task status tracking,
-  duplicate suppression.
-- **Phase 3 — Multi-cloud routing:** additional provider adapters, health
-  checks, latency- and cost-aware routing, automatic failover.
-- **Phase 4 — Distributed response management:** idempotency keys, duplicate
-  response detection, task ownership, conflict resolution.
-- **Phase 5 — Physical robot integration:** camera and sensor capture, hand
+- [x] **Phase 2 — Reliable communication:** SQLite outbox written before send,
+  MQTT QoS 1, ACKs, bounded retries with backoff, restart recovery, duplicate
+  suppression. Implemented in [`../robotic-hand/phase2_reliability/`](../robotic-hand/phase2_reliability/).
+- [x] **Phase 3 — Multi-cloud routing:** provider adapters, health checks,
+  circuit breaker, latency-aware ordering, sequential failover and
+  deadline-derived timeouts. Implemented in [`../robotic-hand/phase3_router/`](../robotic-hand/phase3_router/).
+- [x] **Phase 4 — Distributed response management:** task IDs end to end,
+  first-writer-wins result claims, discard logging, idempotent robot decision
+  gate and safe defaults. Implemented in [`../robotic-hand/phase4_conflict/`](../robotic-hand/phase4_conflict/).
+- [ ] **Phase 5 — Physical robot integration:** camera and sensor capture, hand
   controller, actuator control, safety mechanisms, end-to-end testing.
 
 ## Troubleshooting

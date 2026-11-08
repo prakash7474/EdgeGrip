@@ -1,120 +1,133 @@
-# robotic-hand — Phase 1: baseline cloud pipeline
+# robotic-hand — edge/cloud inference pipeline (phases 1–4)
 
 A low-cost robotic hand for small factories that cannot afford a local AI
-server. An edge client captures a camera frame, sends it to a cloud inference
-endpoint, and gets a decision back. This folder is the phase-by-phase build of
-that system.
+server. An edge client captures a camera frame, sends it through a reliable
+MQTT link, and gets a conflict-checked decision back from one of several
+inference providers.
 
-**Phase 1 proves one thing:** a camera frame reaches a cloud endpoint, a
-decision comes back, and the round trip is measured. There is deliberately no
-retry, no queue, no broker and no multi-provider routing yet.
+This folder is the phase-by-phase implementation. Phases 1–4 are complete and
+tested; Phase 5 (robot hardware) is not started.
 
 ## Status
 
 | Phase | Scope | Status |
 |---|---|---|
 | **1** | Baseline edge → cloud pipeline with measured latency | **Complete** |
-| **2** | Reliable delivery: MQTT (Mosquitto), SQLite outbox, QoS 1, ACKs, retries with backoff, dedup | **Complete (tests written, broker-dependent)** |
-| **3** | Multi-provider router with health checks and failover | **Complete** |
-| 4 | End-to-end task IDs, first-valid-answer-wins | Not started |
+| **2** | Reliable delivery: MQTT (Mosquitto), SQLite outbox, QoS 1, ACKs, retries with backoff, dedup | **Complete** (integration tests need Docker) |
+| **3** | Multi-provider router: health checks, circuit breaker, sequential failover, deadline-derived timeouts | **Complete** |
+| **4** | Task context end to end, result claims, discard log, robot decision gate, safe defaults | **Complete** |
 | 5 | Robot hardware integration | Not started |
 
-Test status for Phase 1: **15 passed, 0 failed** (`python -m pytest -q`, offline).
+Latest offline run in this workspace (Windows 11, Python 3.14.5):
+
+```
+39 passed, 5 skipped
+```
+
+Skipped: 4 real-model tests (`RUN_REAL_MODEL!=1`) and 1 Docker/broker
+integration test. Phase 2's six broker tests also skip when Docker is
+unavailable (reported separately below).
 
 ## How it works
 
 ```
-images/ (or camera)
-      │  capture.py: OpenCV frame, JPEG bytes
+camera / images
+      │  phase1_pipeline/capture.py
       ▼
-phase1_pipeline/capture.py ── Frame(name, jpeg_bytes, width, height)
-      │
+Frame(name, jpeg_bytes, width, height)
+      │  phase2_reliability/outbox.py  (pending row before send)
       ▼
-phase1_pipeline/client.py ── POST raw JPEG, timeout, perf_counter round trip
-      │
-      ▼
-mock_server/app.py (FastAPI) ── deterministic label for known images
-      │
-      ▼
-InferenceResult(ok, latency_ms, prediction, error_kind)
-      │
-      ▼
-phase1_pipeline/benchmark.py ── one CSV row per request + avg/min/max
-      │
-      ▼
-docs/measurements.md ── Phase 1 section updated with the real numbers
+Publisher ──MQTT QoS 1──► Mosquitto ──► Worker
+      ▲                                   │  dedup by task_id
+      │ ACK                               ▼
+      └──────────────────────────── phase3_router/router.py
+                                          │ health checks
+                                          │ circuit breaker
+                                          │ remaining-deadline / remaining-providers
+                                          ▼
+                              provider (mock A, mock B, or real RT-DETR)
+                                          │ echoes task_id
+                                          ▼
+                          results claim (first writer wins)
+                                          │
+                                          ▼
+                          robot decision gate (applied_ids)
+                              deadline · newer frame · already applied
+                                          │
+                                          ▼
+                         apply decision | safe default | discard(late)
 ```
 
-The mock server returns the label declared for each sample image in
-`images/labels.json`, keyed by the SHA-256 of the file. It is a deterministic
-stand-in for a hosted model: it makes the tests offline and reproducible, and
-it is clearly not an accuracy benchmark.
+Phase 1 can still be run on its own: capture → HTTP POST → measured round trip.
 
 ## Project structure
 
 ```
 robotic-hand/
 ├── README.md
-├── .env.example
-├── .gitignore
-├── requirements.txt
+├── .env.example / .gitignore
+├── requirements.txt / requirements-real.txt
 ├── pytest.ini
-├── docker-compose.yml        # Mosquitto broker for Phase 2
-├── phase2_reliability/      # Outbox, publisher, worker, ACKs, retries
-├── mosquitto/               # Mosquitto config
-├── images/
-│   ├── banana.jpg
-│   ├── cat.jpg
-│   ├── dog.jpg
-│   └── labels.json           # expected labels used by TC1.3
-├── mock_server/
-│   ├── __init__.py
-│   ├── app.py                # deterministic /predict and /predict/slow
-│   └── __main__.py           # python -m mock_server
+├── docker-compose.yml            # Mosquitto broker (Phase 2)
+├── mosquitto/                    # broker config
+├── images/                       # sample frames + labels.json
+├── mock_server/                  # deterministic /predict and /predict/slow
+├── real_server/                  # optional RT-DETR endpoint
 ├── phase1_pipeline/
-│   ├── __init__.py
-│   ├── config.py             # all environment access and validation
-│   ├── capture.py            # camera with sample-image fallback
-│   ├── client.py             # HTTP POST, timeout, latency, structured errors
-│   └── benchmark.py          # N requests, CSV, avg/min/max, measurements doc
+│   ├── capture.py                # camera with sample-image fallback
+│   ├── client.py                 # HTTP POST, timeouts, latency, structured errors
+│   ├── benchmark.py              # N requests, CSV, avg/min/max
+│   └── config.py
+├── phase2_reliability/
+│   ├── common.py                 # message format + task context fields
+│   ├── outbox.py                 # durable pending/sent/acked state
+│   ├── publisher.py              # QoS 1, ACK, backoff resend, offline drain
+│   ├── worker.py                 # dedup, inference, claim, gate, result publish
+│   └── config.py
+├── phase3_router/
+│   ├── router.py                 # health, breaker, EWMA, sequential failover
+│   ├── config.py
+│   └── providers/                # base protocol, HTTP adapter, controllable mocks
+├── phase4_conflict/
+│   ├── context.py                # TaskContext (task_id, attempt, ts, deadline)
+│   ├── store.py                  # results, discarded, applied_ids, DecisionGate
+│   └── __init__.py
+├── benchmarks/router_overhead.py # loopback-only overhead benchmark
 ├── tests/
-│   ├── conftest.py           # in-process mock server on a free loopback port
-│   ├── test_tc1_1_single_request.py
-│   ├── test_tc1_2_batch.py
-│   ├── test_tc1_3_known_label.py
-│   └── test_tc1_4_failure.py
-├── docs/
-│   └── measurements.md       # real measured numbers
-└── logs/                     # generated CSV (gitignored)
+│   ├── test_tc1_*.py             # Phase 1 (15 tests)
+│   ├── phase2/                   # TC2.1–TC2.6 (Docker/broker)
+│   ├── phase3/                   # TC3.1–TC3.9 + integration
+│   ├── phase4/                   # TC4.1–TC4.12
+│   └── test_real_model.py        # marked real_model
+├── docs/measurements.md          # real measurements, labelled mock vs real
+└── logs/                         # generated CSV/DB (gitignored)
 ```
 
 ## Setup
 
-Python 3.10 or newer is required; it was verified on 3.14.5.
+Python 3.10 or newer is required; verified on 3.14.5.
 
 ```bash
 cd robotic-hand
 
 python -m venv .venv
-# Windows (Git Bash / PowerShell):
-source .venv/Scripts/activate
-# macOS / Linux:
-# source .venv/bin/activate
+source .venv/Scripts/activate     # Windows (Git Bash)
+# macOS / Linux: source .venv/bin/activate
 
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-
 cp .env.example .env
 ```
 
 `requirements.txt` pins `fastapi`, `uvicorn`, `opencv-python`, `numpy`,
-`requests`, `python-dotenv` and `pytest`. No API key is needed for Phase 1.
+`requests`, `python-dotenv`, `paho-mqtt` and `pytest`. No API key is needed for
+the offline path.
 
-## Configuration
+### Configuration
 
-All settings come from environment variables (or `.env`, which is gitignored);
+All settings come from environment variables (or `.env`, gitignored);
 `.env.example` documents every one. Nothing is hard-coded, no secret is stored
-in source, and the API key is never written to a log or CSV row.
+in source, and API keys are never logged.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -127,152 +140,58 @@ in source, and the API key is never written to a log or CSV row.
 | `SAMPLE_IMAGES_DIR` | `images` | Fallback frames and `labels.json` |
 | `BENCHMARK_CSV_PATH` | `logs/latency.csv` | Per-request latency log |
 | `MEASUREMENTS_PATH` | `docs/measurements.md` | Where results are recorded |
-
-### Using a real provider (optional)
-
-Set `INFERENCE_MODE=real`, `INFERENCE_ENDPOINT` to the provider's documented
-URL, and `INFERENCE_API_KEY`. The client sends **raw JPEG bytes** with
-`Content-Type: image/jpeg` and a `Bearer` token, then accepts either
-`{"label": ..., "confidence": ...}` or the list shape
-`[{"label": ..., "score": ...}]`.
-
-Provider APIs change and differ from each other, so no hosted endpoint is
-assumed here — check the provider's current docs and point `INFERENCE_ENDPOINT`
-at the right route. Real-provider latency is **not** measured in this phase;
-`docs/measurements.md` contains mock-server numbers only, labelled as such.
+| `MQTT_BROKER_HOST` / `MQTT_BROKER_PORT` | `127.0.0.1` / `1883` | Broker address |
+| `ROUTER_ENDPOINTS` | empty | Comma-separated provider `/predict` URLs |
+| `MODEL_ID` | `PekingU/rtdetr_r18vd` | Real model (optional) |
+| `DETECTION_THRESHOLD` | `0.5` | Real model confidence threshold |
 
 ## Run it
 
-Two terminals. Start the mock inference server first:
+Two terminals for the baseline path:
 
 ```bash
+# terminal 1
 cd robotic-hand
 python -m mock_server --port 8000
-# check: curl http://127.0.0.1:8000/health
-```
 
-Then run the pipeline:
-
-```bash
-# One frame, print the prediction and latency (uses the camera if present)
+# terminal 2
 python -c "from phase1_pipeline.capture import capture_once; \
 from phase1_pipeline.client import CloudClient; \
 f = capture_once('images', camera_enabled=False); \
 r = CloudClient('http://127.0.0.1:8000/predict').predict(f.jpeg_bytes, f.name); \
 print(r.label, r.latency_ms, 'ms')"
 
-# 20 requests: CSV rows, then avg/min/max, and update docs/measurements.md
+# 20 requests: CSV rows, avg/min/max, measurements doc
 python -m phase1_pipeline.benchmark --count 20 --no-camera
 ```
 
-`--no-camera` skips the webcam probe. Without it, capture tries `CAMERA_INDEX`
-first and falls back to `images/` when no device is available.
+`--no-camera` skips the webcam probe; capture falls back to `images/` when no
+device is available.
 
-Stop the mock server with `Ctrl+C` in its terminal.
+### Real model endpoint (optional)
 
-
-
-
-
-## Real model endpoint
-
-This project can run a real object-detection server alongside the mock server. The client switches via the existing `INFERENCE_ENDPOINT` environment variable (no hardcoded URLs).
-
-### Install (real model)
 ```bash
-cd robotic-hand
 pip install -r requirements-real.txt
-```
-
-### Run
-In one terminal:
-```bash
 python -m real_server --port 8001
-# or: MODEL_ID=PekingU/rtdetr_r50vd python -m real_server --port 8001
-```
-In another terminal, point the client/benchmark to it:
-```bash
-# mock (default)
-# INFERENCE_ENDPOINT=http://127.0.0.1:8000/predict
-
-# real
-export INFERENCE_ENDPOINT=http://127.0.0.1:8001/predict  # or set in .env
+export INFERENCE_ENDPOINT=http://127.0.0.1:8001/predict
 python -m phase1_pipeline.benchmark --count 20 --no-camera
-```
-
-### Environment variables
-| Variable | Default | Purpose |
-|---|---|---|
-| `MODEL_ID` | `PekingU/rtdetr_r18vd` | HuggingFace model for `pipeline("object-detection")`. Can swap to `rtdetr_r50vd`. |
-| `DETECTION_THRESHOLD` | `0.5` | Confidence threshold for detections. |
-| `INFERENCE_ENDPOINT` | `http://127.0.0.1:8000/predict` | Target endpoint (mock or real). |
-
-### API contract
-- `POST /predict` accepts raw JPEG bytes (`Content-Type: image/jpeg`), same contract as mock.
-- Returns top label as `prediction` (also `label` for compatibility), `detections` list (`label`, `score`, `box`), and `server_inference_ms` measured around the model call only.
-- If nothing is detected above threshold, returns a valid response with `prediction` `"none"` (not an error).
-- `GET /health` reports `status`, `model`, `device` (CUDA if available else CPU), `threshold`.
-
-### Tests (real model)
-```bash
 RUN_REAL_MODEL=1 REAL_ENDPOINT=http://127.0.0.1:8001/predict python -m pytest tests/test_real_model.py -v
 ```
-Tests are marked `real_model` and skipped unless `RUN_REAL_MODEL=1` is set (model download is large).
 
-**Limitation:** The model is COCO-trained and does not know factory-specific parts.
+`POST /predict` accepts raw JPEG bytes and returns `label`, `prediction`,
+`detections` and `server_inference_ms`; `"none"` means nothing passed the
+threshold. `GET /health` reports the model, device and threshold. The model is
+COCO-trained and does not know factory-specific parts.
 
-## Phase 2: Reliable delivery
+## Phase 1 — baseline pipeline
 
-### How to run (MQTT broker)
-```bash
-cd robotic-hand
-docker compose up -d
-# start mock server in another terminal
-python -m mock_server --port 8000
-```
+Capture a frame, POST raw JPEG, measure the round trip with `perf_counter`, and
+return structured failures instead of raising. The mock server returns the
+label declared in `images/labels.json` keyed by the image SHA-256, so tests are
+deterministic and offline; it is not an accuracy benchmark.
 
-### Architecture (Phase 2)
-- **Outbox (SQLite)**: written as `pending` BEFORE any send attempt (`phase2_reliability/outbox.py`). Survives restarts.
-- **Publisher (edge)**: publishes with MQTT QoS 1, subscribes to ACK topic, marks `acked` only on ACK. Resends unacked with exponential backoff (1s, 2s, 4s, capped at 30s). Offline: keep writing to outbox, drain oldest-first on reconnect.
-- **Worker (cloud)**: subscribes, checks `processed_ids` (SQLite), skips duplicates but re-sends ACK, calls Phase 1 client, publishes result + ACK.
-- **Message format**: JSON with `message_id` (UUID4), `created_at`, `payload` (base64 JPEG, resized/compressed to under ~100 KB).
-
-### Tests (TC2.1–TC2.6)
-```bash
-python -m pytest tests/phase2 -v
-```
-Tests use scripted failures (broker stop/start via docker, killing/restarting edge processes). **Guarantee**: "no message loss in the tested failure modes".
-
-Results are recorded in `docs/measurements.md` under the Phase 2 section.
-
-## Tests
-
-The whole suite runs offline. `tests/conftest.py` starts the mock server in a
-background Uvicorn thread on a free loopback port, so no Docker, no credentials
-and no internet are involved.
-
-```bash
-cd robotic-hand
-python -m pytest -q
-```
-
-| Case | Test | What is asserted |
-|---|---|---|
-| **TC1.1** | `test_tc1_1_single_request.py` | One valid image returns HTTP 200 with a prediction, in **under 5 s** (measured). Capture falls back to a sample when no camera exists and raises a clear error when neither source exists. |
-| **TC1.2** | `test_tc1_2_batch.py` | 20 back-to-back requests all complete, every row lands in the CSV in order, and avg/min/max in the log match statistics recomputed from the file. The measurements writer replaces its own section instead of duplicating it. |
-| **TC1.3** | `test_tc1_3_known_label.py` | Each labelled sample returns its expected label; repeated and unknown images return a stable label. |
-| **TC1.4** | `test_tc1_4_failure.py` | A 200 ms timeout against a slow endpoint, a refused loopback connection and an invalid payload are all caught and recorded (CSV rows with `ok=False`), the benchmark keeps going, and the client succeeds on the next request. |
-
-Result of the last run in this workspace (Windows 11, Python 3.14.5):
-
-```
-15 passed in 4.25s
-```
-
-## Measured baseline
-
-From a real 20-request run against the local mock server; the full record is in
-[`docs/measurements.md`](docs/measurements.md):
+Measured baseline from a real 20-request run against the local mock server
+(full record in [`docs/measurements.md`](docs/measurements.md)):
 
 | Metric | Value |
 |---|---|
@@ -282,43 +201,152 @@ From a real 20-request run against the local mock server; the full record is in
 | Minimum | 3.342 ms |
 | Maximum | 50.853 ms |
 
-The maximum is dominated by `dog.jpg` (~500 KB), whose upload and SHA-256 cost
-more than the smaller frames; the minimum is a small frame on a warm connection.
-**These are loopback mock numbers, not cloud numbers.** No hosted provider was
-called, so no real-network latency is claimed.
+These are loopback mock numbers, not cloud numbers. No hosted provider was
+called.
 
-## Known limitations
+## Phase 2 — reliable delivery
 
-- **Mock accuracy means nothing.** The mock server looks labels up by image
-  hash. TC1.3 verifies the plumbing (bytes out, JSON back, labels match the
-  manifest), not model quality.
-- **No delivery guarantee.** One POST, one timeout, and the result is
-  abandoned on failure. There is no retry, queue, ACK or deduplication — that
-  is Phase 2.
-- **Real-provider path is unverified.** It is configurable and implemented
-  generically, but no hosted API was called in this phase.
-- **One image per request, no batching or compression.** The large sample frame
-  is sent at full size; Phase 2 adds resizing/compression.
-- **Camera path is simple.** A frame is grabbed per request with a short warm-up
-  and no calibration; hardware integration is Phase 5.
-- **Latency depends on the machine and the frame size**, so compare runs on the
-  same host.
+`docker compose up -d` starts Mosquitto; `python -m mock_server` provides
+inference.
 
-## Next phase
+- **Outbox (SQLite)**: row written as `pending` **before** any send attempt,
+  then `sent`, then `acked` only on ACK. Survives restarts.
+- **Publisher**: MQTT QoS 1, subscribes to the ACK topic, resends unacked
+  messages with backoff 1 s → 2 s → 4 s capped at 30 s, oldest first. Offline
+  frames stay in the outbox and drain on reconnect.
+- **Worker**: checks `processed_ids`, skips duplicates but re-sends the ACK,
+  runs inference, records the result, publishes the result and ACK.
+- **Message format**: JSON with `message_id` (UUID4), `created_at`, base64 JPEG
+  (compressed under ~100 KB) plus Phase 4 fields (`attempt`,
+  `frame_timestamp`, `deadline`).
 
-Phase 2 adds reliable delivery: a Mosquitto broker via `docker-compose.yml`, a
-SQLite outbox written before every send, MQTT QoS 1, ACK-driven `acked` state,
-exponential backoff and restart recovery. It is intentionally not built yet.
+```bash
+python -m pytest tests/phase2 -v   # requires Docker; otherwise skipped
+```
 
+Guarantee: *no message loss in the tested failure modes*.
 
-## Phase 3: Multi-provider router
+## Phase 3 — multi-provider router
 
-- **Router**: `phase3_router/router.py` routes each task to **exactly one provider**. Health checks skip unhealthy providers; on failure/timeout it fails over to the next in order.
-- **Providers**: `phase3_router/providers/` includes HTTP adapter and two controllable mock providers (`mock_provider_a`, `mock_provider_b`) that can be made slow or fail on command (via control endpoints/env) for scripted tests. **Real endpoint** included as a third option.
-- **Tests**: `tests/phase3/test_tc3_router.py` (TC3.1–TC3.5) cover healthy routing, failover on failure, failover on timeout, both providers fail, and three-provider configuration including real endpoint.
+`phase3_router/router.py` routes each task to **exactly one provider**:
+
+- Background health checks with a cached result — never on the request path.
+- Circuit breaker: opens after consecutive failures, skips the provider during
+  cooldown, half-open trial, closes on success.
+- EWMA latency preference among healthy providers.
+- Sequential failover only; providers are never called in parallel.
+- Per-attempt timeout derived from `remaining_deadline / remaining_providers`
+  with a floor, split into connect and read budgets.
+
+Providers live in `phase3_router/providers/`: an HTTP adapter plus two
+controllable mock servers (force 503, slow, hang, random faults, label
+override) and the optional real endpoint.
 
 ```bash
 python -m pytest tests/phase3 -v
+python benchmarks/router_overhead.py   # loopback-only, records run count
 ```
 
-Results recorded in `docs/measurements.md` under Phase 3 (mock vs real labelled).
+TC3.8 is measured over 5 runs with a bound of
+`connect_timeout + read_timeout + one failover call + fixed slack`. The earlier
+4028 ms regression was an accidental second call to the same hanging provider
+(`TypeError` from timeout formatting caught as "provider lacks task_context").
+Recorded breakdown and min/median/max are in `docs/measurements.md`.
+
+## Phase 4 — conflict handling
+
+Every task carries `task_id` (= Phase 2 `message_id`), attempt, frame timestamp
+and deadline from the outbox through the broker, worker, router and provider.
+Mock providers echo `task_id`; the router rejects a mismatch and logs it.
+
+| Table | Purpose |
+|---|---|
+| `results(task_id PRIMARY KEY, provider, decision, claimed_at)` | Claimed with `INSERT … ON CONFLICT DO NOTHING`; first writer wins |
+| `discarded(task_id, provider, reason, received_at)` | `duplicate`, `late`, `mismatch` — never dropped silently |
+| `applied_ids(task_id PRIMARY KEY, frame_timestamp, frame_ts_num, decision, applied_at)` | Robot gate state; survives restarts |
+
+The decision gate applies a decision only when it is not already applied, the
+deadline has not passed, and no newer frame has already been decided. An
+expired deadline yields a safe default; a later answer is logged as `late` and
+never applied.
+
+```bash
+python -m pytest tests/phase4 -v
+```
+
+TC4.8 runs 1000 tasks through the worker + router + gate with injected random
+500s, delays, duplicate deliveries and expired deadlines. Injected faults are
+reported separately from organic observations, and injected expirations are not
+reported as a late-answer rate. See `docs/measurements.md`.
+
+TC4.10 (crash after inference, before ACK) and TC4.11 (edge process killed
+mid-task, restarted in a separate process) run real subprocesses and verify the
+same task is applied exactly once.
+
+## Tests
+
+The offline suite needs no Docker, credentials or internet:
+`tests/conftest.py` starts the deterministic mock server in a background
+Uvicorn thread on a free loopback port.
+
+```bash
+python -m pytest -q
+```
+
+| Case | Test file | What is asserted |
+|---|---|---|
+| **TC1.1** | `test_tc1_1_single_request.py` | One valid image returns 200 with a prediction under 5 s; capture falls back to a sample or raises clearly |
+| **TC1.2** | `test_tc1_2_batch.py` | 20 requests complete, CSV rows in order, avg/min/max match recomputation |
+| **TC1.3** | `test_tc1_3_known_label.py` | Labelled samples return expected labels; repeats and unknown images are stable |
+| **TC1.4** | `test_tc1_4_failure.py` | Timeout, refused connection and invalid payload are caught, logged, and the client continues |
+| **TC2.1–2.6** | `phase2/` | 100 messages no loss, broker restart, edge restart, duplicate once, backoff, overhead (Docker) |
+| **TC3.1–3.9** | `phase3/` | Healthy routing, failure/timeout failover, both fail, three providers, recovery, latency preference, measured failover bound, 50 concurrent tasks |
+| **TC4.1–4.12** | `phase4/` | Context echo, claim race, discard reasons, mismatch rejection, 200 real claim-path trials, gate rules, safe default, 1000-task run, deadline timeout, crash/restart, late-after-B, edge kill/restart |
+
+### Latest run
+
+```bash
+# Phase 1 + Phase 3 + Phase 4 (skips real model and Docker integration)
+SKIP_PHASE2_DOCKER_TESTS=1 python -m pytest tests/test_tc1_1_single_request.py \
+  tests/test_tc1_2_batch.py tests/test_tc1_3_known_label.py \
+  tests/test_tc1_4_failure.py tests/test_real_model.py tests/phase3 tests/phase4 -q
+# 39 passed, 5 skipped, 0 failed
+
+python -m pytest tests/phase2 -q
+# 6 skipped — Docker not available
+```
+
+Skipped and why: 4 real-model tests (`RUN_REAL_MODEL!=1`), 1 Phase 3
+Docker/broker integration test, and 6 Phase 2 Docker/broker tests.
+
+## Measured numbers
+
+Real, measured results only — no fabricated values. All sections are in
+[`docs/measurements.md`](docs/measurements.md), including:
+
+- Phase 1 loopback latency (above).
+- Phase 2 reliability runs, where Docker was available.
+- Phase 3 failover bound over 5 runs (min/median/max) and router overhead
+  (loopback-only).
+- Phase 4 claim races, discard counts by reason, deadline-derived timeout
+  success rates before/after the circuit breaker opens, and the 1000-task run.
+
+## Known limitations
+
+- **Mock accuracy means nothing.** Labels come from a hash manifest; TC1.3
+  verifies plumbing, not model quality.
+- **Broker path tests need Docker.** They skip cleanly without it; the
+  guarantee is limited to the tested failure modes.
+- **Real-provider/model path is optional and unverified here.** The RT-DETR
+  server exists, but its benchmark was not run in this environment (model
+  download and Python/torch compatibility).
+- **Camera path is simple.** One frame per request, no calibration; hardware
+  integration is Phase 5.
+- **Latency depends on host and frame size**, so compare runs on the same host.
+- **Mock providers over loopback** are used for Phase 3/4 measurements; they
+  demonstrate routing/conflict behaviour, not WAN performance.
+
+## Next phase
+
+Phase 5 integrates the physical robot hand: camera and sensor capture,
+actuator control, safety mechanisms and end-to-end field tests.

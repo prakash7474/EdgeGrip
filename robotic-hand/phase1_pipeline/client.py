@@ -62,6 +62,7 @@ class InferenceResult:
     error_message: str | None
     sent_at: str
     image_name: str = "frame"
+    echoed_task_id: str | None = None
 
     @property
     def label(self) -> str | None:
@@ -73,9 +74,25 @@ class InferenceResult:
         """Return the predicted confidence, if any."""
         return self.prediction.confidence if self.prediction else None
 
+    @property
+    def task_id(self) -> str | None:
+        if self.echoed_task_id:
+            return self.echoed_task_id
+        if self.prediction and isinstance(self.prediction.extra, dict):
+            tid = self.prediction.extra.get("task_id")
+            return str(tid) if tid else None
+        return None
+
     def within_target(self, target_ms: float) -> bool:
         """Return True when this successful response met the latency target."""
         return self.ok and self.latency_ms <= target_ms
+
+
+def _format_timeout(value: float | tuple[float, float]) -> str:
+    """Render a scalar or (connect, read) timeout without assuming a scalar."""
+    if isinstance(value, (tuple, list)):
+        return f"connect={float(value[0]):.3f}s read={float(value[1]):.3f}s"
+    return f"{float(value):.3f}s"
 
 
 def _parse_prediction(payload: Any) -> Prediction | None:
@@ -152,7 +169,9 @@ class CloudClient:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    def predict(self, jpeg_bytes: bytes, image_name: str = "frame") -> InferenceResult:
+    def predict(self, jpeg_bytes: bytes, image_name: str = "frame",
+                task_context: Any = None, extra_headers: dict[str, str] | None = None,
+                timeout_seconds: float | tuple[float, float] | None = None) -> InferenceResult:
         """Send one JPEG and return a structured result.
 
         Network problems, timeouts, HTTP errors and malformed responses are all
@@ -172,17 +191,42 @@ class CloudClient:
                 image_name=image_name,
             )
 
+        headers = self._headers()
+        if extra_headers:
+            headers.update(extra_headers)
+        if task_context is not None:
+            try:
+                if hasattr(task_context, "to_headers"):
+                    headers.update(task_context.to_headers())
+                elif isinstance(task_context, dict):
+                    if task_context.get("task_id"):
+                        headers["X-Task-Id"] = str(task_context["task_id"])
+                    if task_context.get("attempt") is not None:
+                        headers["X-Attempt"] = str(task_context["attempt"])
+                    if task_context.get("frame_timestamp") is not None:
+                        headers["X-Frame-Timestamp"] = str(task_context["frame_timestamp"])
+                    if task_context.get("deadline") is not None:
+                        headers["X-Deadline"] = str(task_context["deadline"])
+            except Exception:
+                pass
+
+        effective_timeout = self.timeout_seconds if timeout_seconds is None else timeout_seconds
+        if isinstance(effective_timeout, (tuple, list)):
+            effective_timeout = (float(effective_timeout[0]), float(effective_timeout[1]))
+        else:
+            effective_timeout = float(effective_timeout)
+
         start = time.perf_counter()
         try:
             response = self._session.post(
                 self.endpoint,
                 data=jpeg_bytes,
-                headers=self._headers(),
-                timeout=self.timeout_seconds,
+                headers=headers,
+                timeout=effective_timeout,
             )
         except requests.Timeout:
             return self._failure(started_at, start, ERROR_TIMEOUT,
-                                 f"No response within {self.timeout_seconds:.3f} s", image_name)
+                                 f"No response within {_format_timeout(effective_timeout)}", image_name)
         except requests.ConnectionError as exc:
             return self._failure(started_at, start, ERROR_CONNECTION,
                                  f"Could not reach endpoint: {exc.__class__.__name__}", image_name)
@@ -191,6 +235,11 @@ class CloudClient:
                                  f"Request failed: {exc.__class__.__name__}", image_name)
 
         latency_ms = _elapsed_ms(start)
+        echoed = None
+        try:
+            echoed = response.headers.get("X-Task-Id") or response.headers.get("x-task-id")
+        except Exception:
+            echoed = None
 
         if response.status_code >= 400:
             detail = " ".join((response.text or "").split())[:200]
@@ -203,6 +252,7 @@ class CloudClient:
                 error_message=f"HTTP {response.status_code}: {detail}".strip(),
                 sent_at=started_at,
                 image_name=image_name,
+                echoed_task_id=echoed,
             )
 
         try:
@@ -217,6 +267,7 @@ class CloudClient:
                 error_message="Response body was not valid JSON.",
                 sent_at=started_at,
                 image_name=image_name,
+                echoed_task_id=echoed,
             )
 
         prediction = _parse_prediction(payload)
@@ -230,8 +281,12 @@ class CloudClient:
                 error_message="Response JSON had no usable 'label' field.",
                 sent_at=started_at,
                 image_name=image_name,
+                echoed_task_id=echoed or (str(payload.get("task_id")) if isinstance(payload, dict) and payload.get("task_id") else None),
             )
 
+        echoed_tid = echoed
+        if not echoed_tid and isinstance(payload, dict) and payload.get("task_id"):
+            echoed_tid = str(payload.get("task_id"))
         return InferenceResult(
             ok=True,
             status_code=response.status_code,
@@ -241,6 +296,7 @@ class CloudClient:
             error_message=None,
             sent_at=started_at,
             image_name=image_name,
+            echoed_task_id=echoed_tid,
         )
 
     def _failure(

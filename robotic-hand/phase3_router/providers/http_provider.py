@@ -47,10 +47,20 @@ class HTTPProvider:
         except Exception:
             return False
 
-    def predict(self, jpeg_bytes: bytes) -> ProviderResult:
+    def predict(self, jpeg_bytes: bytes, task_context: Any = None,
+                timeout: float | None = None) -> ProviderResult:
         t0 = time.perf_counter()
-        res = self.client.predict(jpeg_bytes, image_name="router")
+        effective = None
+        if timeout is not None:
+            # Split the per-attempt budget so connect + read never exceed it.
+            budget = max(0.05, float(timeout))
+            connect_part = min(self.connect_timeout, budget * 0.25)
+            read_part = max(0.05, budget - connect_part)
+            effective = (connect_part, read_part)
+        res = self.client.predict(jpeg_bytes, image_name="router", task_context=task_context,
+                                  timeout_seconds=effective)
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 3)
+        echoed_tid = getattr(res, "task_id", None) or getattr(res, "echoed_task_id", None)
         if res.ok and res.label:
-            return ProviderResult(ok=True, label=res.label, latency_ms=res.latency_ms, provider_name=self.name, status_code=res.status_code)
-        return ProviderResult(ok=False, latency_ms=res.latency_ms, error=res.error_message or res.error_kind, provider_name=self.name, status_code=res.status_code)
+            return ProviderResult(ok=True, label=res.label, latency_ms=res.latency_ms, provider_name=self.name, status_code=res.status_code, task_id=echoed_tid)
+        return ProviderResult(ok=False, latency_ms=res.latency_ms, error=res.error_message or res.error_kind, provider_name=self.name, status_code=res.status_code, task_id=echoed_tid)

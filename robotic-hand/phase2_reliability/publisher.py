@@ -76,10 +76,10 @@ class Publisher:
         except Exception as e:
             LOG.warning("Bad ACK: %s", e)
 
-    def send_frame(self, jpeg_bytes: bytes) -> str:
+    def send_frame(self, jpeg_bytes: bytes, *, attempt: int = 1, frame_timestamp: str = "", deadline: float = 0.0) -> str:
         # prepare/compress to under ~100KB
         prepared = prepare_jpeg_under_size(jpeg_bytes, max_kb=100.0)
-        msg = self.outbox.enqueue(prepared)
+        msg = self.outbox.enqueue(prepared, attempt=attempt, frame_timestamp=frame_timestamp, deadline=deadline)
         self._publish_message(msg)
         return msg.message_id
 
@@ -102,8 +102,15 @@ class Publisher:
                     for entry in self.outbox.get_unacked_for_resend(now):
                         # compute backoff based on retry_count
                         backoff = compute_backoff(entry.retry_count)
-                        # if never sent or past timeout, resend
-                        msg = Message(message_id=entry.message_id, created_at=entry.created_at, payload=entry.payload_b64)
+                        # if never sent or past timeout, resend (carry Phase 4 context)
+                        msg = Message(
+                            message_id=entry.message_id,
+                            created_at=entry.created_at,
+                            payload=entry.payload_b64,
+                            attempt=getattr(entry, "attempt", 1) or 1,
+                            frame_timestamp=getattr(entry, "frame_timestamp", "") or "",
+                            deadline=float(getattr(entry, "deadline", 0.0) or 0.0),
+                        )
                         if not self._connected.is_set():
                             break  # offline, keep writing to outbox
                         self.client.publish(self.settings.topic_publish, msg.to_json(), qos=1)

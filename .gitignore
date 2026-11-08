@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# Repository-wide ignores. Sub-project .gitignore files add their own rules.
+# ---------------------------------------------------------------------------
+
+# Secrets — never commit real credentials
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data (SQLite outboxes, processed/applied/conflict state)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Generated logs and reports (committed docs/measurements.md is kept)
+*.log
+logs/*.csv
+!logs/.gitkeep
+
+# Local tooling / environment
+.freebuff/
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

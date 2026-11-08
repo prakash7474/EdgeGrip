@@ -13,6 +13,7 @@ class ProviderResult:
     error: str | None = None
     provider_name: str = ""
     status_code: int | None = None
+    task_id: str | None = None
 
 
 class Provider(Protocol):
@@ -22,5 +23,5 @@ class Provider(Protocol):
     def health(self) -> bool:
         ...
 
-    def predict(self, jpeg_bytes: bytes) -> ProviderResult:
+    def predict(self, jpeg_bytes: bytes, task_context: Any = None) -> ProviderResult:
         ...

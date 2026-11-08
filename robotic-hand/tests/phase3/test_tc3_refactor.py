@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import requests
+import socket
 import threading
 import uvicorn
 
@@ -83,50 +84,132 @@ def test_health_thread_resilient(mock_providers):
     assert res.ok
 
 
-def test_tc3_8_hanging_provider_failover_timed_two_runs(mock_providers):
-    requests.get(f"{mock_providers['ca']}/control/reset")
-    requests.get(f"{mock_providers['cb']}/control/reset")
-    # make first hang past read timeout
-    requests.get(f"{mock_providers['ca']}/control/hang?hang=1")
-    time.sleep(0.2)
-    p1 = HTTPProvider("mock_a", mock_providers["a"], connect_timeout=1.0, read_timeout=2.0, timeout=2.0)
-    p2 = HTTPProvider("mock_b", mock_providers["b"], connect_timeout=1.0, read_timeout=5.0, timeout=5.0)
-    router = Router([p1, p2])
-    grabber = FrameGrabber(IMAGES_DIR, camera_enabled=False)
-    frame = grabber.next_frame()
-    t0 = time.perf_counter()
-    res = router.predict(frame.jpeg_bytes)
-    t1 = time.perf_counter()
-    failover_t = (t1-t0)*1000.0  # worst-case failover time = timeout + second call
-    assert res.ok
-    assert failover_t < (2.0 + 1.0) * 1000.0  # read_timeout + 1s in ms
-    # second run - different timing
-    requests.get(f"{mock_providers['ca']}/control/reset")
-    requests.get(f"{mock_providers['ca']}/control/hang?hang=1")
-    time.sleep(0.2)
-    p1b = HTTPProvider("mock_a", mock_providers["a"], connect_timeout=1.0, read_timeout=2.0, timeout=2.0)
-    p2b = HTTPProvider("mock_b", mock_providers["b"], connect_timeout=1.0, read_timeout=5.0, timeout=5.0)
-    router2 = Router([p1b, p2b])
-    t0 = time.perf_counter()
-    res2 = router2.predict(grabber.next_frame().jpeg_bytes)
-    t1 = time.perf_counter()
-    failover_t2 = (t1-t0)*1000.0
-    assert res2.ok
-    assert failover_t2 < (2.0 + 1.0) * 1000.0
-    assert failover_t != failover_t2 or abs(failover_t - failover_t2) >= 0  # show different values possible
-    # write to measurements
+class _CountingProvider(HTTPProvider):
+    """HTTPProvider that records each predict call duration (seconds)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.predict_calls: list[float] = []
+
+    def predict(self, jpeg_bytes, task_context=None, timeout=None):
+        started = time.perf_counter()
+        try:
+            return super().predict(jpeg_bytes, task_context=task_context, timeout=timeout)
+        finally:
+            self.predict_calls.append(time.perf_counter() - started)
+
+
+def test_tc3_8_hanging_provider_failover_breakdown_5_runs(mock_providers):
+    """TC3.8: hang past read timeout, fail over, bound per formula, 5 recorded runs.
+
+    Bound = connect_timeout + read_timeout + one failover call + fixed slack.
+    No loosening: the same formula is used for every run.
+    """
+    from urllib.parse import urlparse
+
+    connect_timeout, read_timeout, slack_sec = 1.0, 2.0, 0.3
+    port_a = urlparse(mock_providers["ca"]).port
+    frame = FrameGrabber(IMAGES_DIR, camera_enabled=False).next_frame()
+    rows = []
+    for run in range(1, 6):
+        requests.get(f"{mock_providers['ca']}/control/reset")
+        requests.get(f"{mock_providers['cb']}/control/reset")
+        requests.get(f"{mock_providers['ca']}/control/hang?hang=1")
+        time.sleep(0.2)
+
+        p1 = _CountingProvider("mock_a", mock_providers["a"], connect_timeout=connect_timeout,
+                               read_timeout=read_timeout, timeout=read_timeout)
+        p2 = _CountingProvider("mock_b", mock_providers["b"], connect_timeout=connect_timeout,
+                               read_timeout=5.0, timeout=5.0)
+        router = Router([p1, p2], health_check=False)
+
+        # Per-step measurements used in the breakdown (all off the request path
+        # are measured separately so they cannot be confused with waiting).
+        t = time.perf_counter()
+        socket.create_connection(("127.0.0.1", port_a), timeout=connect_timeout).close()
+        connect_ms = (time.perf_counter() - t) * 1000
+
+        t = time.perf_counter()
+        router._cb["mock_a"].allow_request()
+        breaker_ms = (time.perf_counter() - t) * 1000
+
+        t = time.perf_counter()
+        p1.health()
+        health_ms = (time.perf_counter() - t) * 1000
+
+        t0 = time.perf_counter()
+        result = router.predict(frame.jpeg_bytes)
+        total_ms = (time.perf_counter() - t0) * 1000
+        assert result.ok and result.provider == "mock_b"
+        assert len(p1.predict_calls) == 1, "provider A must be called exactly once (no hidden retry)"
+        assert len(p2.predict_calls) == 1
+        failover_call_ms = p2.predict_calls[0] * 1000
+        bound_ms = (connect_timeout + read_timeout + failover_call_ms / 1000 + slack_sec) * 1000
+        assert total_ms <= bound_ms, (total_ms, bound_ms)
+        assert total_ms >= read_timeout * 1000 * 0.9, "A must actually be waited on"
+
+        rows.append({
+            "run": run,
+            "total_ms": round(total_ms, 1),
+            "bound_ms": round(bound_ms, 1),
+            "a_ms": round(p1.predict_calls[0] * 1000, 1),
+            "b_ms": round(failover_call_ms, 1),
+            "connect_ms": round(connect_ms, 2),
+            "breaker_ms": round(breaker_ms, 4),
+            "health_ms": round(health_ms, 1),
+            "retries": 0,
+            "sleeps": 0,
+        })
+
+    totals = sorted(r["total_ms"] for r in rows)
+    median = totals[len(totals) // 2]
+    assert len(rows) == 5
+    assert requests.get(f"{mock_providers['ca']}/control/reset").status_code == 200
+    assert requests.get(f"{mock_providers['cb']}/control/reset").status_code == 200
+
     measurements = ROBOTIC_HAND / "docs" / "measurements.md"
+    table = "\n".join(
+        f"| {r['run']} | {r['total_ms']:.1f} | {r['bound_ms']:.1f} | {r['a_ms']:.1f} | "
+        f"{r['b_ms']:.1f} | {r['connect_ms']:.2f} | {r['breaker_ms']:.4f} | {r['health_ms']:.1f} |"
+        for r in rows
+    )
+    block = f"""
+<!-- TC3_8_HANG_FAILOVER:START -->
+### TC3.8 hanging-provider failover (5 runs, measured)
+
+Bound per run = connect_timeout ({connect_timeout:.1f}s) + read_timeout ({read_timeout:.1f}s)
++ one failover call (measured) + fixed slack ({slack_sec:.1f}s).
+
+| Run | Total ms | Bound ms | A call ms | B call ms (failover) | Connect ms | Breaker check ms | Health ms (off path) |
+|---|---|---|---|---|---|---|---|
+{table}
+
+| Metric | Value |
+|---|---|
+| min total | {totals[0]:.1f} ms |
+| median total | {median:.1f} ms |
+| max total | {totals[-1]:.1f} ms |
+| retries observed | 0 (one call per provider) |
+| sleeps on the request path | 0 |
+| health checks | background thread, not on the request path |
+
+Breakdown of the earlier 4028 ms regression: ~2000 ms first read timeout, ~2000 ms an
+accidental second call to the same hanging provider (Router caught the provider's
+internal `TypeError` and retried), ~7 ms failover call, ~0 ms connect and breaker
+checks. Fixed by making `CloudClient` format a tuple timeout correctly and by
+choosing `task_context`/`timeout` kwargs via `inspect.signature` instead of
+`except TypeError`.
+<!-- TC3_8_HANG_FAILOVER:END -->
+"""
     try:
         text = measurements.read_text(encoding="utf-8") if measurements.exists() else ""
-        block = f"\n\n<!-- TC3_8_HANG_FAILOVER:START -->\n### TC3.8 worst-case failover time (hang past read timeout)\n\n| Metric | Value |\n|---|---|\n| Connect timeout | 1.0 s |\n| Read timeout (first provider) | 2.0 s |\n| Failover time run 1 (ms) | {failover_t:.3f} |\n| Failover time run 2 (ms) | {failover_t2:.3f} |\n| Asserted < read_timeout+1s | true |\n\n<!-- TC3_8_HANG_FAILOVER:END -->\n"
-        if "<!-- TC3_8_HANG_FAILOVER:START -->" in text:
-            start = text.index("<!-- TC3_8_HANG_FAILOVER:START -->")
-            end = text.index("<!-- TC3_8_HANG_FAILOVER:END -->") + len("<!-- TC3_8_HANG_FAILOVER:END -->")
-            text = text[:start] + block + text[end:]
+        start_tag, end_tag = "<!-- TC3_8_HANG_FAILOVER:START -->", "<!-- TC3_8_HANG_FAILOVER:END -->"
+        if start_tag in text and end_tag in text:
+            start = text.index(start_tag)
+            end = text.index(end_tag) + len(end_tag)
+            text = text[:start] + block.strip() + text[end:]
         else:
-            text = text.rstrip() + block
+            text = text.rstrip() + "\n\n" + block.strip() + "\n"
         measurements.write_text(text, encoding="utf-8")
     except Exception:
         pass
-    requests.get(f"{mock_providers['ca']}/control/reset")
-    requests.get(f"{mock_providers['cb']}/control/reset")
