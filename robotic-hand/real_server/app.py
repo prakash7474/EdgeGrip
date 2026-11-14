@@ -6,8 +6,7 @@ auto-detected (CUDA if available else CPU). Configurable via environment variabl
 
 from __future__ import annotations
 
-import asyncio
-import json
+import hmac
 import logging
 import os
 import time
@@ -16,7 +15,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from PIL import Image
 
@@ -116,12 +115,40 @@ class RealModel:
         return response, server_inference_ms
 
 
-def create_app() -> FastAPI:
+def _api_token() -> str:
+    """Return the configured token, or an empty string when authentication is off."""
+    return os.getenv("API_TOKEN", "").strip()
+
+
+def _token_matches(provided: str) -> bool:
+    """Constant-time comparison against ``API_TOKEN``.
+
+    An unset ``API_TOKEN`` never authorizes a request: the server fails closed
+    with 503 instead of silently accepting an empty header.
+    """
+    expected = _api_token()
+    if not expected:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+def create_app(model: RealModel | None = None) -> FastAPI:
+    """Build the real inference application.
+
+    Args:
+        model: Optional pre-built model. Tests inject a stub so they can check
+            auth and routing without downloading torch weights.
+    """
     app = FastAPI(title="Robotic Hand real inference server", version="1.0.0")
-    model = RealModel()
-    # warm up before serving
-    model.warmup()
+    if model is None:
+        model = RealModel()
+        # Warm up before serving so the first real request is not the slowest.
+        model.warmup()
     app.state.model = model
+    if _api_token():
+        LOG.info("API token authentication enabled for /predict")
+    else:
+        LOG.warning("API_TOKEN is not set; /predict will return 503 until it is configured")
 
     async def _read_body(request: Request) -> bytes | JSONResponse:
         body = await request.body()
@@ -146,26 +173,44 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        """Liveness probe. Deliberately exposes only model and device."""
         m = app.state.model
         return {
-            "status": "ok",
             "model": m.model_id,
             "device": m.device,
-            "threshold": m.threshold,
         }
 
     @app.post("/predict")
     async def predict(request: Request) -> JSONResponse:
+        """Run inference on a raw JPEG. Requires the ``X-API-Token`` header."""
+        if not _api_token():
+            # Fail closed: an unconfigured server cannot authenticate anyone.
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Server is not configured with API_TOKEN."},
+            )
+        if not _token_matches(request.headers.get("X-API-Token", "")):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Unauthorized"},
+                headers={"WWW-Authenticate": "X-API-Token"},
+            )
         body = await _read_body(request)
         if isinstance(body, JSONResponse):
             return body
+        task_id = (request.headers.get("X-Task-Id") or "").strip()
         try:
             result, _ = app.state.model.predict(body)
-            return JSONResponse(status_code=200, content=result)
+            if task_id:
+                result["task_id"] = task_id
+            return JSONResponse(
+                status_code=200,
+                content=result,
+                headers={"X-Task-Id": task_id} if task_id else None,
+            )
         except Exception as e:
+            # Do not echo request headers or the token in error responses.
+            LOG.exception("Inference failed")
             return JSONResponse(status_code=500, content={"detail": str(e)})
 
     return app
-
-
-app = create_app()

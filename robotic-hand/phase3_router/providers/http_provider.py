@@ -1,6 +1,7 @@
 """HTTP provider with shared session and separate timeouts."""
 from __future__ import annotations
 
+import os
 import time
 
 import requests
@@ -13,7 +14,8 @@ from phase3_router.providers.base import ProviderResult
 class HTTPProvider:
     def __init__(self, name: str, endpoint: str, timeout: float = 10.0,
                  connect_timeout: float | None = None, read_timeout: float | None = None,
-                 api_key: str = "", session: requests.Session | None = None,
+                 api_key: str = "", api_token: str | None = None,
+                 session: requests.Session | None = None,
                  pool_connections: int = 50, pool_maxsize: int = 50):
         self.name = name
         self.endpoint = endpoint
@@ -25,6 +27,10 @@ class HTTPProvider:
             self.connect_timeout = float(connect_timeout) if connect_timeout is not None else float(timeout)
             self.read_timeout = float(read_timeout) if read_timeout is not None else float(timeout)
         self.api_key = api_key
+        # The client reads the token from the environment unless one is passed
+        # explicitly. It is never logged or included in repr/errors.
+        self.api_token = (api_token if api_token is not None
+                          else os.getenv("API_TOKEN", "")).strip()
         self._session = session or requests.Session()
         try:
             adapter = HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize)
@@ -32,7 +38,8 @@ class HTTPProvider:
             self._session.mount('https://', adapter)
         except Exception:
             pass
-        self.client = CloudClient(endpoint, timeout_seconds=(self.connect_timeout, self.read_timeout), api_key=api_key, session=self._session)
+        self.client = CloudClient(endpoint, timeout_seconds=(self.connect_timeout, self.read_timeout),
+                                  api_key=api_key, api_token=self.api_token, session=self._session)
 
     def health(self) -> bool:
         try:

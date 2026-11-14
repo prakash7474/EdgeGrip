@@ -283,6 +283,56 @@ TC4.10 (crash after inference, before ACK) and TC4.11 (edge process killed
 mid-task, restarted in a separate process) run real subprocesses and verify the
 same task is applied exactly once.
 
+## Phase 5a — live cloud test harness
+
+Phase 5a adds no pipeline features. It prepares and measures a real deployment
+of the existing phases against cloud-hosted `real_server` instances.
+
+- **`real_server/Dockerfile`** — CPU image; `MODEL_ID`, `DETECTION_THRESHOLD`
+  and `API_TOKEN` come from the environment, weights are preloaded at build
+  time by default (`PRELOAD_MODEL=0` defers to first start), and the
+  healthcheck probes `/health`.
+- **Token auth** — `/predict` requires `X-API-Token` matching `API_TOKEN`;
+  missing/wrong values get `401`, and an unconfigured server returns `503`.
+  `/health` returns only model and device. The client reads `API_TOKEN` and
+  never logs it.
+- **`live_run.py`** — webcam at a requested fps for a requested duration,
+  through outbox → MQTT → worker → router → providers. It measures latency on
+  the edge clock and writes `docs/live_results.md` with sent/acked/applied/
+  safe-default/lost counts, duplicates, p50/p95/p99, achieved fps, max outbox
+  depth, failover events and the recorded environment. `--soak` adds a
+  memory/outbox CSV every 10 s.
+- **`fault_drill.py`** — timed operator instructions (stop provider A, cut
+  Wi-Fi for 20 s, kill the edge, both providers down for 60 s) with epoch
+  timestamps and a CSV that joins to the latency log.
+- **`docs/deploy.md`** — Google Cloud and Azure CPU VM setup, Docker install,
+  firewall limited to your IP, budget alerts, teardown, and the plain-HTTP
+  warning.
+
+```bash
+# Token (same value on the client and the container)
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Build and run the real server image locally
+docker build -f real_server/Dockerfile -t robotic-hand-real-server:5a .
+docker run --rm -p 8001:8001 \
+  -e API_TOKEN="$API_TOKEN" \
+  -e MODEL_ID=PekingU/rtdetr_r18vd \
+  -e DETECTION_THRESHOLD=0.5 \
+  robotic-hand-real-server:5a
+
+# Live run against one or two endpoints
+export ROUTER_ENDPOINTS="http://VM_A:8001/predict,http://VM_B:8001/predict"
+python live_run.py --duration 120 --fps 2 --soak \
+  --network "home fibre, Wi-Fi 5" --vm-type "e2-standard-2" --region "us-central1"
+
+# Timed fault sequence in a second terminal
+python fault_drill.py
+```
+
+`--source images` exists only as a plumbing smoke test when no camera is
+available; it is labelled as such in the generated report.
+
 ## Tests
 
 The offline suite needs no Docker, credentials or internet:

@@ -34,9 +34,8 @@ def test_real_health_reports_device_and_model():
     resp = requests.get(base, timeout=30)
     assert resp.status_code == 200
     data = resp.json()
-    assert "device" in data
-    assert "model" in data
-    assert data.get("status") == "ok"
+    # /health intentionally exposes only model and device.
+    assert set(data) == {"model", "device"}
 
 
 @pytest.mark.skipif(not _real_enabled(), reason="Set RUN_REAL_MODEL=1 to run real model tests (large download)")

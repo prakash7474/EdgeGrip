@@ -138,6 +138,7 @@ class CloudClient:
         endpoint: Full URL, e.g. ``http://127.0.0.1:8000/predict``.
         timeout_seconds: Timeout applied to connect and read phases.
         api_key: Optional bearer token. Never logged.
+        api_token: Optional ``X-API-Token`` value for ``real_server``. Never logged.
         session: Optional pre-built ``requests.Session`` (useful in tests).
     """
 
@@ -147,6 +148,7 @@ class CloudClient:
         *,
         timeout_seconds: float | tuple[float, float] = 10.0,
         api_key: str = "",
+        api_token: str = "",
         session: requests.Session | None = None,
     ) -> None:
         if not endpoint.startswith(("http://", "https://")):
@@ -157,6 +159,7 @@ class CloudClient:
         else:
             self.timeout_seconds = float(timeout_seconds)
         self._api_key = api_key
+        self._api_token = api_token.strip()
         self._session = session or requests.Session()
         self._owns_session = session is None
 
@@ -167,6 +170,8 @@ class CloudClient:
         headers = {"Content-Type": "image/jpeg", "Accept": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._api_token:
+            headers["X-API-Token"] = self._api_token
         return headers
 
     def predict(self, jpeg_bytes: bytes, image_name: str = "frame",
