@@ -2,13 +2,13 @@
 
 # Robotic Hand — Edge/Cloud AI Pipeline
 
-![Status](https://img.shields.io/badge/status-implemented%20phases%201%E2%80%934-2E7D32)
+![Status](https://img.shields.io/badge/status-implemented%20phases%201%E2%80%935b%20%28firmware%20untested%29-2E7D32)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-edge%20%2B%20cloud-6B7280)
 
 AI-assisted robotic hand for small-scale industrial automation. Perception and decision-making run on whichever compute is available — an on-site GPU if the factory has one, a rented cloud GPU if it doesn't — connected through a reliable messaging layer so no sensor reading or command is lost if the network drops.
 
-The reference implementation lives in [`robotic-hand/`](robotic-hand/README.md). Phases 1–4 are built and tested: baseline pipeline, reliable MQTT delivery, multi-provider routing, and conflict-safe decision handling.
+The reference implementation lives in [`robotic-hand/`](robotic-hand/README.md). Phases 1–5b are implemented and tested offline: baseline pipeline, reliable MQTT delivery, multi-provider routing, conflict-safe decision handling, and an actuator layer with a serial device protocol. The Phase 5b firmware sketch is **untested on real hardware**; no physical robot has been driven.
 
 ## Table of contents
 
@@ -39,6 +39,8 @@ This repository contains a working reference implementation plus the original si
 | **2 — reliable delivery** | SQLite outbox written before send, Mosquitto/MQTT QoS 1, ACKs, exponential backoff, restart recovery, worker dedup | [`robotic-hand/phase2_reliability/`](robotic-hand/phase2_reliability/) |
 | **3 — multi-provider routing** | Health checks, circuit breaker, EWMA preference, sequential failover, shared sessions, deadline-derived timeouts | [`robotic-hand/phase3_router/`](robotic-hand/phase3_router/) |
 | **4 — conflict handling** | Task context end to end, first-writer-wins result claims, discard log, robot decision gate, safe defaults, exactly-once application | [`robotic-hand/phase4_conflict/`](robotic-hand/phase4_conflict/) |
+| **5a — deployment harness** | Token-authenticated container image, live latency/fault drills, cloud deployment notes | [`robotic-hand/live_run.py`](robotic-hand/live_run.py), [`robotic-hand/docs/deploy.md`](robotic-hand/docs/deploy.md) |
+| **5b — actuation** | Actuator interface (stub/serial/sim), config-driven policy, gate → one action per task, checksummed serial protocol, fake device, firmware sketch and hardware safety notes | [`robotic-hand/actuator/`](robotic-hand/actuator/), [`robotic-hand/firmware/`](robotic-hand/firmware/), [`robotic-hand/docs/device_protocol.md`](robotic-hand/docs/device_protocol.md) |
 
 The earlier single-provider prototype is kept in [`robot-cloud-ai/`](robot-cloud-ai/README.md) for comparison; it is not the current pipeline.
 
@@ -46,7 +48,8 @@ The earlier single-provider prototype is kept in [`robot-cloud-ai/`](robot-cloud
 
 - **Hybrid inference routing** — prefers local GPU compute when available, falls back to cloud automatically
 - **Zero data loss on disconnect** — local buffering and durable message delivery, not best-effort
-- **Safety-first local control** — motor control and e-stop logic never depend on the network
+- **Safety-first local control** — motor control and e-stop logic never depend on the network; the device refuses motion without heartbeats and a physical e-stop is required
+- **Auditable actuation** — one logged action per task, with the device ACK/NACK reason and capture-to-ACK latency
 - **Hardware-agnostic cloud path** — works with any production-grade rented GPU inference service
 - **Model sync** — local and cloud inference paths kept on compatible model versions
 
@@ -63,6 +66,7 @@ The earlier single-provider prototype is kept in [`robot-cloud-ai/`](robot-cloud
 5. **Router** — skips unhealthy providers (background health checks), respects a circuit breaker, prefers the lowest recent latency, and fails over **sequentially**. Each attempt's timeout is derived from the remaining deadline divided by the remaining providers, with a floor.
 6. **Providers** — deterministic controllable mock providers for tests, plus an optional real RT-DETR endpoint. Each response echoes `task_id`; a mismatch is rejected and logged.
 7. **Decision gate (robot side)** — applies a decision only if it is not already applied, the deadline has not passed, and no newer frame has already been decided. Expired deadlines fall back to a safe default; a later answer is logged as `late` and never applied.
+8. **Actuation** — the gate's decision is mapped by a configurable `(label, score)` policy to at most one action, claimed in `actuation_log` before sending. The actuator speaks a checksummed line protocol; the firmware enforces angle/speed limits, command-id dedup and a heartbeat safe state. Default is `hold`, which sends nothing.
 
 ## Tech stack
 
@@ -127,9 +131,11 @@ robotic-hand/
 ├── phase2_reliability/        # outbox, publisher, worker, common/config
 ├── phase3_router/             # router, health checks, providers
 ├── phase4_conflict/           # task context, claims, discard log, decision gate
+├── actuator/                  # interface, policy, actuation log, protocol, fake device
+├── firmware/                  # ESP32/Arduino sketch (untested on hardware)
 ├── benchmarks/                # router overhead benchmark
-├── tests/                     # TC1.x, phase2, phase3, phase4 suites
-└── docs/measurements.md       # real measurements, never fabricated
+├── tests/                     # TC1.x, phase2, phase3, phase4, phase5b suites
+└── docs/                      # measurements, device protocol, hardware safety
 ```
 
 ## Reliability: how data loss is actually prevented
@@ -169,14 +175,15 @@ Track and alert on:
 - [x] Cloud inference path + reliable delivery (worker, retries, dedup)
 - [x] Multi-provider routing with health checks and failover
 - [x] Conflict handling: task IDs, claims, decision gate, safe defaults
+- [x] Actuator layer, policy, device protocol, fake device and hardware safety docs (firmware sketch written but untested on hardware)
 - [ ] Local GPU inference path on Jetson-class hardware
-- [ ] Hardware integration with the robot hand
+- [ ] Hardware integration with the robot hand (compile/flash firmware, calibrate, first-run checklist)
 - [ ] Field test in a single factory with no on-site GPU
 - [ ] Field test in a factory with an on-site GPU
 
 ## Contributing
 
-Phases 1–4 are implemented and tested. Issues and pull requests that correct behaviour, extend test coverage, or add hardware integration notes are welcome. Please open an issue describing the change before submitting a large pull request.
+Phases 1–5b are implemented and tested offline; the firmware sketch is untested on real hardware. Issues and pull requests that correct behaviour, extend test coverage, or add hardware integration notes are welcome. Please open an issue describing the change before submitting a large pull request.
 
 ## License
 

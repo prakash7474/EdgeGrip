@@ -27,6 +27,9 @@ class RouterResult:
     task_id: str | None = None
     decision: str | None = None
     attempt_timeouts_ms: List[float] | None = None
+    # Confidence of the winning label, when the provider reports one. Kept for
+    # the Phase 5b actuation policy; None means "not reported".
+    score: float | None = None
 
 
 class CircuitBreaker:
@@ -253,6 +256,7 @@ class Router:
                         task_id=str(req_task_id) if req_task_id is not None else getattr(res, "task_id", None),
                         decision=res.label,
                         attempt_timeouts_ms=attempt_timeouts_ms,
+                        score=getattr(res, "score", None),
                     )
                 else:
                     errors.append(f"{provider.name}:{res.error or 'failed'}")

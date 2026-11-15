@@ -1,9 +1,11 @@
-"""Phase 5a live run: webcam -> outbox -> MQTT -> worker -> router -> providers.
+"""Phase 5a/5b live run: webcam -> outbox -> MQTT -> worker -> router ->
+providers -> decision gate -> actuator.
 
 This is a measurement harness, not a new pipeline stage. It wires the existing
-Phase 1-4 components together, captures frames at a requested rate for a
-requested duration, and writes ``docs/live_results.md`` from real observations
-only. Values that cannot be measured are reported as "not available".
+Phase 1-4 components and the Phase 5b actuation layer together, captures frames
+at a requested rate for a requested duration, and writes
+``docs/live_results.md`` from real observations only. Values that cannot be
+measured are reported as "not available".
 
 Examples
 --------
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import ctypes
+import json
 import math
 import os
 import platform
@@ -40,7 +43,17 @@ from typing import Any
 import cv2
 import paho.mqtt.client as mqtt
 
+from actuator import (
+    ActuationGrip,
+    ActuationLog,
+    Actuator,
+    SerialActuator,
+    SimActuator,
+    StubActuator,
+    load_policy,
+)
 from phase1_pipeline.capture import CaptureError, encode_jpeg, list_sample_images, load_sample_frame
+from phase2_reliability.common import new_message_id
 from phase2_reliability.config import Settings, load_settings
 from phase2_reliability.outbox import Outbox
 from phase2_reliability.publisher import Publisher
@@ -101,6 +114,69 @@ def fmt(value: float | int | None, digits: int = 1, suffix: str = "") -> str:
     if value is None:
         return "not available"
     return f"{value:.{digits}f}{suffix}"
+
+
+def capture_to_actuator_ack_ms(outcomes: list[Any],
+                               captures: dict[str, dict[str, Any]]) -> tuple[list[float], int]:
+    """Join gate outcomes to capture times on the edge's perf_counter clock.
+
+    Returns ``(latencies_ms, unjoined_acks)``. Holds and NACKs/timeouts are
+    excluded: only a command the device ACKed has a capture-to-ACK duration.
+    """
+    latencies: list[float] = []
+    unjoined = 0
+    for outcome in outcomes:
+        result = getattr(outcome, "result", None)
+        if result is None or not getattr(result, "acked", False):
+            continue
+        acked_perf = getattr(result, "acked_perf", None)
+        if acked_perf is None:
+            continue
+        capture = captures.get(outcome.task_id)
+        if not capture or capture.get("perf") is None:
+            unjoined += 1
+            continue
+        latencies.append(round((acked_perf - float(capture["perf"])) * 1000.0, 3))
+    return latencies, unjoined
+
+
+def write_actuation_csv(path: Path, rows: list[dict], outcomes: list[Any],
+                        captures: dict[str, dict[str, Any]]) -> None:
+    """Write one row per logged task, with capture-to-ACK ms when ACKed."""
+    results = {
+        outcome.task_id: outcome.result
+        for outcome in outcomes
+        if getattr(outcome, "result", None) is not None
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([
+            "task_id", "command_id", "action", "parameters", "captured_at_utc",
+            "sent_at", "acked_at", "acked", "reason", "detail",
+            "capture_to_ack_ms",
+        ])
+        for row in rows:
+            task_id = str(row["task_id"])
+            result = results.get(task_id)
+            capture = captures.get(task_id) or {}
+            ack_ms = ""
+            if (result is not None and result.acked and result.acked_perf is not None
+                    and capture.get("perf") is not None):
+                ack_ms = f"{(result.acked_perf - float(capture['perf'])) * 1000.0:.3f}"
+            writer.writerow([
+                task_id,
+                row.get("command_id") or "",
+                row.get("action") or "",
+                json.dumps(row.get("parameters") or {}, sort_keys=True),
+                capture.get("captured_at", ""),
+                row.get("sent_at") or "",
+                row.get("acked_at") or "",
+                "yes" if row.get("acked") else "no",
+                row.get("reason") or "",
+                row.get("detail") or "",
+                ack_ms,
+            ])
 
 
 def rss_mb() -> float | None:
@@ -243,8 +319,10 @@ class RecordingGate:
         self.applied: dict[str, dict[str, Any]] = {}
 
     def try_apply(self, task_id: str, decision: str, frame_timestamp: str | float = "",
-                  deadline: float = 0.0, now: float | None = None) -> Any:
-        result = self._gate.try_apply(task_id, decision, frame_timestamp, deadline, now=now)
+                  deadline: float = 0.0, now: float | None = None,
+                  score: float | None = None) -> Any:
+        result = self._gate.try_apply(task_id, decision, frame_timestamp, deadline,
+                                      now=now, score=score)
         if getattr(result, "applied", False):
             with self._lock:
                 self.applied[task_id] = {
@@ -564,7 +642,7 @@ def write_results_doc(path: Path, data: dict[str, Any]) -> None:
     lines: list[str] = []
     add = lines.append
 
-    add("# Live run results — Phase 5a")
+    add("# Live run results — Phase 5a/5b")
     add("")
     add(f"- **Run ID:** `{data['run_id']}`")
     if data.get("label"):
@@ -598,6 +676,11 @@ def write_results_doc(path: Path, data: dict[str, Any]) -> None:
     add(f"| Duplicate deliveries discarded | {summary['duplicates']} |")
     add(f"| Publisher resends | {summary['resends']} |")
     add(f"| Result messages received | {summary['results']} |")
+    add(f"| Actuation rows logged | {summary['actuation_rows']} |")
+    add(f"| Commands ACKed | {summary['commands_acked']} |")
+    add(f"| Commands NACKed | {summary['commands_nacked']} |")
+    add(f"| Commands unconfirmed (no ACK) | {summary['commands_unconfirmed']} |")
+    add(f"| Hold decisions (nothing sent) | {summary['holds']} |")
     add(f"| Achieved capture rate | {fmt(data['achieved_fps'], 2, ' fps')} |")
     add(f"| Achieved applied rate | {fmt(data['applied_fps'], 2, ' fps')} |")
     add(f"| Max outbox depth (1 s samples) | {data['max_depth']} |")
@@ -620,6 +703,35 @@ def write_results_doc(path: Path, data: dict[str, Any]) -> None:
     add("Latency is `perf_counter` at frame capture to `perf_counter` when the result")
     add("arrived on the edge's result subscription. Frames without a result are not")
     add("included in the percentiles.")
+    add("")
+
+    actuation = data["actuation"]
+    act_latency = data["actuation_latency"]
+    add("## Capture → actuator ACK latency")
+    add("")
+    add("| Percentile | Latency |")
+    add("|---|---|")
+    add(f"| p50 | {fmt(act_latency['p50'], 1, ' ms')} |")
+    add(f"| p95 | {fmt(act_latency['p95'], 1, ' ms')} |")
+    add(f"| p99 | {fmt(act_latency['p99'], 1, ' ms')} |")
+    add(f"| min | {fmt(act_latency['min'], 1, ' ms')} |")
+    add(f"| max | {fmt(act_latency['max'], 1, ' ms')} |")
+    add(f"| samples | {act_latency['count']} |")
+    add("")
+    add("`perf_counter` at frame capture to `perf_counter` when the actuator ACK was")
+    add("read on the edge. Only ACKed commands are included: a hold sends nothing and")
+    add("a NACK or timeout has no ACK. A NACK is recorded in `actuation_log` with its")
+    add("reason; an unconfirmed command is never retried automatically.")
+    add("")
+    add(f"Actuation rows: {actuation['rows']} total, {actuation['acked']} ACKed, "
+        f"{actuation['nacked']} NACKed, {actuation['unconfirmed']} unconfirmed, "
+        f"{actuation['holds']} holds.")
+    add("")
+    add(f"Per-command rows (including holds): `{data['actuation_csv']}`")
+    if actuation["unjoined_acks"]:
+        add("")
+        add(f"{actuation['unjoined_acks']} ACKed command(s) had no matching capture row "
+            "and are excluded from the percentiles.")
     add("")
 
     add("## Failover events")
@@ -665,6 +777,9 @@ def write_results_doc(path: Path, data: dict[str, Any]) -> None:
     add("")
     add("- The worker and provider calls ran in this process on the edge machine;")
     add("  provider endpoints were reached over the network.")
+    add("- Actuation runs synchronously in the worker thread, so a slow actuator ACK")
+    add("  also delays the result message and the edge latency above.")
+    add("- An actuator ACK means the command was accepted, not that the motion finished.")
     add("- CPU inference latency depends on the VM size and region; compare runs only")
     add("  on identical hardware.")
     add("- Traffic in this phase is plain HTTP with an `X-API-Token` header; use")
@@ -679,7 +794,8 @@ def write_results_doc(path: Path, data: dict[str, Any]) -> None:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Phase 5a live run: webcam -> outbox -> MQTT -> worker -> providers",
+        description=("Phase 5 live run: webcam -> outbox -> MQTT -> worker -> "
+                     "providers -> decision gate -> actuator"),
     )
     parser.add_argument("--duration", type=float, default=60.0, help="Run length in seconds (default 60)")
     parser.add_argument("--fps", type=float, default=2.0, help="Capture rate (default 2)")
@@ -701,6 +817,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out", default=str(DEFAULT_RESULTS_PATH), help="Results Markdown path")
     parser.add_argument("--run-dir", default=str(DEFAULT_RUN_ROOT), help="Root for run databases/CSVs")
     parser.add_argument("--soak", action="store_true", help="Write memory/outbox samples every 10 s")
+    parser.add_argument("--actuator", choices=("stub", "sim", "serial"), default="stub",
+                        help="Actuator backend (default stub: logs only, no hardware)")
+    parser.add_argument("--serial-port", default=None,
+                        help="Serial port for --actuator serial (default ACTUATION_SERIAL_PORT)")
+    parser.add_argument("--serial-baud", type=int, default=115200,
+                        help="Serial baud rate (default 115200)")
+    parser.add_argument("--policy", default=None,
+                        help="Actuation policy JSON (default ACTUATION_POLICY_PATH or built-in)")
     parser.add_argument("--label", default="", help="Free-form label for this run")
     parser.add_argument("--network", default="", help="Network description for the report")
     parser.add_argument("--vm-type", default="", help="Provider VM type(s) for the report")
@@ -719,6 +843,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--deadline-ms must be positive")
     if args.grace < 0:
         parser.error("--grace cannot be negative")
+    if args.serial_baud <= 0:
+        parser.error("--serial-baud must be positive")
     return args
 
 
@@ -734,6 +860,27 @@ def resolve_broker(value: str | None) -> tuple[str, int]:
     return (
         os.getenv("MQTT_BROKER_HOST", "127.0.0.1").strip() or "127.0.0.1",
         int(os.getenv("MQTT_BROKER_PORT", "1883")),
+    )
+
+
+def build_actuator(kind: str, serial_port: str | None,
+                    baudrate: int) -> tuple[Actuator, str]:
+    """Create the requested actuator and a report-safe description."""
+    if kind == "stub":
+        return StubActuator(), "stub — logs commands, drives no hardware"
+    if kind == "sim":
+        return SimActuator(), "PyBullet kinematic simulation — no hardware"
+    port = (serial_port or os.getenv("ACTUATION_SERIAL_PORT", "")).strip()
+    if not port:
+        raise ValueError(
+            "--actuator serial needs --serial-port or ACTUATION_SERIAL_PORT"
+        )
+    actuator = SerialActuator(port, baudrate=baudrate)
+    actuator.start_heartbeat()
+    return (
+        actuator,
+        f"serial {port} @ {baudrate} baud "
+        f"(heartbeat every {actuator.heartbeat_interval_s:g}s)",
     )
 
 
@@ -793,6 +940,17 @@ def main(argv: list[str] | None = None) -> int:
     gate = DecisionGate(run_dir / "conflict.db")
     recording_gate = RecordingGate(gate)
 
+    actuation_log = ActuationLog(run_dir / "conflict.db")
+    try:
+        policy = load_policy(args.policy)
+        actuator, actuator_description = build_actuator(
+            args.actuator, args.serial_port, args.serial_baud
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    grip = ActuationGrip(recording_gate, policy, actuator, actuation_log)
+
     calls: list[ProviderCall] = []
     calls_lock = threading.Lock()
     providers = [
@@ -813,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
         settings,
         router=router,
         conflict_store=conflict_store,
-        decision_gate=recording_gate,
+        decision_gate=grip,
     )
     captures: dict[str, dict[str, Any]] = {}
     captures_lock = threading.Lock()
@@ -870,21 +1028,27 @@ def main(argv: list[str] | None = None) -> int:
             jpeg, width, height = source.read()
             captured_perf = time.perf_counter()
             captured_wall = time.time()
+            captured_at = utc_now_iso()
             if first_frame_size is None:
                 first_frame_size = (width, height)
             deadline = captured_wall + (args.deadline_ms / 1000.0)
-            message_id = publisher.send_frame(
-                jpeg,
-                frame_timestamp=f"{captured_wall:.6f}",
-                deadline=deadline,
-            )
+            # Generate the id locally so the capture timestamp is recorded before
+            # the worker can possibly apply the task. This keeps the capture ->
+            # result and capture -> actuator-ACK joins race-free.
+            message_id = new_message_id()
             with captures_lock:
                 captures[message_id] = {
                     "perf": captured_perf,
                     "wall": captured_wall,
-                    "captured_at": utc_now_iso(),
+                    "captured_at": captured_at,
                     "size": (width, height),
                 }
+            publisher.send_frame(
+                jpeg,
+                message_id=message_id,
+                frame_timestamp=f"{captured_wall:.6f}",
+                deadline=deadline,
+            )
             sent += 1
 
             next_at += interval
@@ -921,7 +1085,15 @@ def main(argv: list[str] | None = None) -> int:
         collector.stop()
         worker.stop()
         publisher.stop()
+        try:
+            actuator.close()
+        except Exception:
+            pass
         source.close()
+        actuation_outcomes = grip.snapshot()
+        actuation_counts = actuation_log.counts()
+        with captures_lock:
+            captures_snapshot = {key: dict(value) for key, value in captures.items()}
         with calls_lock:
             calls_snapshot = list(calls)
         try:
@@ -940,6 +1112,15 @@ def main(argv: list[str] | None = None) -> int:
         for result in results.values()
         if result.get("edge_ms") is not None
     ]
+    # Capture -> actuator ACK, on the same perf_counter clock. Only ACKed
+    # commands are included: a hold sends nothing, and a NACK/timeout has no ACK.
+    actuation_latencies, unjoined_acks = capture_to_actuator_ack_ms(
+        actuation_outcomes, captures_snapshot
+    )
+    write_actuation_csv(
+        run_dir / "actuation.csv", actuation_log.rows(),
+        actuation_outcomes, captures_snapshot,
+    )
     safe_default = sum(1 for r in results.values() if r["decision"] == "safe_default")
     failover_events, exhausted = build_failover_events(calls_snapshot)
 
@@ -953,6 +1134,11 @@ def main(argv: list[str] | None = None) -> int:
         "duplicates": int(discard_counts.get("duplicate", 0)),
         "resends": resends,
         "results": len(results),
+        "actuation_rows": actuation_counts["total"],
+        "commands_acked": actuation_counts["acked"],
+        "commands_nacked": actuation_counts["nacked"],
+        "commands_unconfirmed": actuation_counts["unacked"],
+        "holds": actuation_counts["holds"],
     }
     environment = {
         "Source": ("webcam index " + str(args.camera)) if args.source == "camera"
@@ -961,6 +1147,11 @@ def main(argv: list[str] | None = None) -> int:
         "JPEG quality": str(args.quality),
         "Per-frame deadline": f"{args.deadline_ms:.0f} ms",
         "Broker": f"{broker_host}:{broker_port} (MQTT QoS 1)",
+        "Actuator": actuator_description,
+        "Actuation policy": (
+            f"{args.policy or os.getenv('ACTUATION_POLICY_PATH', '') or 'built-in default'} "
+            f"({len(policy.rules)} rule(s), default {policy.default_action})"
+        ),
         "Provider endpoints": ", ".join(redact_endpoint(ep) for ep in endpoints),
         "Provider health at start": "; ".join(f"{k}: {v}" for k, v in health_start.items()) or "not checked",
         "Provider health at end": "; ".join(f"{k}: {v}" for k, v in health_end.items()) or "not checked",
@@ -1001,17 +1192,38 @@ def main(argv: list[str] | None = None) -> int:
         "max_depth": monitor.max_depth,
         "exhausted_tasks": exhausted,
         "failover_events": failover_events,
+        "actuation": {
+            "rows": actuation_counts["total"],
+            "acked": actuation_counts["acked"],
+            "nacked": actuation_counts["nacked"],
+            "unconfirmed": actuation_counts["unacked"],
+            "holds": actuation_counts["holds"],
+            "unjoined_acks": unjoined_acks,
+        },
+        "actuation_latency": {
+            "p50": percentile(actuation_latencies, 50),
+            "p95": percentile(actuation_latencies, 95),
+            "p99": percentile(actuation_latencies, 99),
+            "min": min(actuation_latencies) if actuation_latencies else None,
+            "max": max(actuation_latencies) if actuation_latencies else None,
+            "count": len(actuation_latencies),
+        },
         "environment": environment,
         "soak_csv": display_path(run_dir / "soak.csv") if args.soak else None,
         "soak_rows": monitor.soak_rows,
         "peak_rss_mb": monitor.peak_rss_mb,
         "latency_csv": display_path(run_dir / "latency.csv"),
+        "actuation_csv": display_path(run_dir / "actuation.csv"),
     }
     write_results_doc(Path(args.out), data)
 
     print(f"\nrun complete: sent={summary['sent']} acked={summary['acked']} "
           f"applied={summary['applied']} safe_default={summary['safe_default']} "
           f"lost={summary['lost']} p50={fmt(data['latency']['p50'], 1, ' ms')}")
+    print(f"actuation: rows={summary['actuation_rows']} acked={summary['commands_acked']} "
+          f"nacked={summary['commands_nacked']} holds={summary['holds']} "
+          f"unconfirmed={summary['commands_unconfirmed']} "
+          f"p50={fmt(data['actuation_latency']['p50'], 1, ' ms')}")
     print(f"report: {Path(args.out)}")
     print(f"run artifacts: {run_dir}")
     return 130 if interrupted else 0

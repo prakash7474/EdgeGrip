@@ -76,10 +76,12 @@ class Publisher:
         except Exception as e:
             LOG.warning("Bad ACK: %s", e)
 
-    def send_frame(self, jpeg_bytes: bytes, *, attempt: int = 1, frame_timestamp: str = "", deadline: float = 0.0) -> str:
+    def send_frame(self, jpeg_bytes: bytes, *, message_id: str | None = None,
+                   attempt: int = 1, frame_timestamp: str = "", deadline: float = 0.0) -> str:
         # prepare/compress to under ~100KB
         prepared = prepare_jpeg_under_size(jpeg_bytes, max_kb=100.0)
-        msg = self.outbox.enqueue(prepared, attempt=attempt, frame_timestamp=frame_timestamp, deadline=deadline)
+        msg = self.outbox.enqueue(prepared, message_id=message_id, attempt=attempt,
+                                  frame_timestamp=frame_timestamp, deadline=deadline)
         self._publish_message(msg)
         return msg.message_id
 

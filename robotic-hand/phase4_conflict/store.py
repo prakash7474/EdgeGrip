@@ -153,8 +153,13 @@ class DecisionGate:
         return self.store._connect()
 
     def try_apply(self, task_id: str, decision: str, frame_timestamp: str | float = "",
-                  deadline: float = 0.0, now: float | None = None) -> DecisionResult:
-        """Apply only if not already applied, deadline not passed, and no newer frame already decided."""
+                  deadline: float = 0.0, now: float | None = None,
+                  score: float | None = None) -> DecisionResult:
+        """Apply only if not already applied, deadline not passed, and no newer frame already decided.
+
+        ``score`` is accepted for the Phase 5b actuation policy and ignored
+        here, so an actuation wrapper can present the same signature.
+        """
         if now is None:
             now = time.time()
         # deadline check

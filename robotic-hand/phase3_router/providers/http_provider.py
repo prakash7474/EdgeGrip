@@ -69,5 +69,7 @@ class HTTPProvider:
         latency_ms = round((time.perf_counter() - t0) * 1000.0, 3)
         echoed_tid = getattr(res, "task_id", None) or getattr(res, "echoed_task_id", None)
         if res.ok and res.label:
-            return ProviderResult(ok=True, label=res.label, latency_ms=res.latency_ms, provider_name=self.name, status_code=res.status_code, task_id=echoed_tid)
+            return ProviderResult(ok=True, label=res.label, latency_ms=res.latency_ms,
+                                  provider_name=self.name, status_code=res.status_code,
+                                  task_id=echoed_tid, score=res.confidence)
         return ProviderResult(ok=False, latency_ms=res.latency_ms, error=res.error_message or res.error_kind, provider_name=self.name, status_code=res.status_code, task_id=echoed_tid)

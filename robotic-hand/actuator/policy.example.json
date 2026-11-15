@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "default": {
+    "action": "hold"
+  },
+  "rules": [
+    {
+      "label": "part",
+      "min_score": 0.6,
+      "action": "grip",
+      "parameters": {
+        "speed": 25
+      }
+    },
+    {
+      "label": "component",
+      "min_score": 0.6,
+      "action": "grip",
+      "parameters": {
+        "speed": 25
+      }
+    },
+    {
+      "label": "bin",
+      "min_score": 0.6,
+      "action": "release",
+      "parameters": {
+        "speed": 25
+      }
+    }
+  ]
+}

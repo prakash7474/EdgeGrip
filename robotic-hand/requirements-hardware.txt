@@ -1,0 +1,11 @@
+# Optional Phase 5b hardware backends. Nothing here is needed for the offline
+# test suite or the stub actuator.
+#
+# pyserial: SerialActuator (real USB serial connection).
+pyserial>=3.5,<4
+#
+# pybullet: SimActuator (kinematic visual simulation). Prebuilt wheels are not
+# available for every Python version/platform; install it only if
+# `pip install pybullet` succeeds in your environment. The SimActuator test
+# skips when it is absent.
+pybullet>=3.2,<4

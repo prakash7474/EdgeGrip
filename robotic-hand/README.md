@@ -1,12 +1,13 @@
-# robotic-hand — edge/cloud inference pipeline (phases 1–4)
+# robotic-hand — edge/cloud inference pipeline (phases 1–5b)
 
 A low-cost robotic hand for small factories that cannot afford a local AI
 server. An edge client captures a camera frame, sends it through a reliable
 MQTT link, and gets a conflict-checked decision back from one of several
 inference providers.
 
-This folder is the phase-by-phase implementation. Phases 1–4 are complete and
-tested; Phase 5 (robot hardware) is not started.
+This folder is the phase-by-phase implementation. Phases 1–5b are implemented
+and tested offline; the Phase 5b firmware sketch is **untested on real
+hardware**, and no physical robot has been driven.
 
 ## Status
 
@@ -16,17 +17,19 @@ tested; Phase 5 (robot hardware) is not started.
 | **2** | Reliable delivery: MQTT (Mosquitto), SQLite outbox, QoS 1, ACKs, retries with backoff, dedup | **Complete** (integration tests need Docker) |
 | **3** | Multi-provider router: health checks, circuit breaker, sequential failover, deadline-derived timeouts | **Complete** |
 | **4** | Task context end to end, result claims, discard log, robot decision gate, safe defaults | **Complete** |
-| 5 | Robot hardware integration | Not started |
+| **5a** | Cloud deployment harness: token auth, container image, live latency/fault scripts, deployment docs | **Complete** |
+| **5b** | Actuator interface, policy, gate→actuator wiring, device protocol, fake device, firmware sketch, hardware docs | **Software complete and tested offline**; firmware untested on hardware |
+| 5c | Field integration with a real hand | Not started |
 
 Latest offline run in this workspace (Windows 11, Python 3.14.5):
 
 ```
-39 passed, 5 skipped
+74 passed, 14 skipped
 ```
 
-Skipped: 4 real-model tests (`RUN_REAL_MODEL!=1`) and 1 Docker/broker
-integration test. Phase 2's six broker tests also skip when Docker is
-unavailable (reported separately below).
+Skipped: 4 real-model tests (`RUN_REAL_MODEL!=1`), 6 Phase 2 broker tests plus
+1 Phase 3 broker test (Docker unavailable), 2 Phase 5b hardware-gated tests
+(TC5b.4/5b.5), and the optional PyBullet test (`pybullet` not installed).
 
 ## How it works
 
@@ -56,6 +59,13 @@ Publisher ──MQTT QoS 1──► Mosquitto ──► Worker
                                           │
                                           ▼
                          apply decision | safe default | discard(late)
+                                          │
+                                          ▼
+                          actuation policy (label, score) → action
+                                          │  actuation_log claim (task_id unique,
+                                          │  command_id derived from task_id)
+                                          ▼
+                          Actuator: stub | serial | sim  ──► hand controller
 ```
 
 Phase 1 can still be run on its own: capture → HTTP POST → measured round trip.
@@ -92,14 +102,32 @@ robotic-hand/
 │   ├── context.py                # TaskContext (task_id, attempt, ts, deadline)
 │   ├── store.py                  # results, discarded, applied_ids, DecisionGate
 │   └── __init__.py
+├── actuator/
+│   ├── base.py                   # Actuator interface + ActuationResult
+│   ├── stub.py                   # logs commands, ACKs immediately (default)
+│   ├── serial_actuator.py        # line protocol over pyserial (optional)
+│   ├── sim.py                    # PyBullet kinematic hand (optional)
+│   ├── protocol.py               # frames, checksum, limits, ACK/NACK parsing
+│   ├── fake_device.py            # Python device used by tests, no hardware
+│   ├── policy.py                 # (label, score) → action, default hold
+│   ├── log.py                    # actuation_log table
+│   ├── grip.py                   # Phase 4 gate → policy → actuator, once per task
+│   └── policy.example.json       # example rule set
+├── firmware/
+│   ├── README.md                 # UNTESTED firmware notes and bench checks
+│   └── robotic_hand/robotic_hand.ino
 ├── benchmarks/router_overhead.py # loopback-only overhead benchmark
 ├── tests/
 │   ├── test_tc1_*.py             # Phase 1 (15 tests)
 │   ├── phase2/                   # TC2.1–TC2.6 (Docker/broker)
 │   ├── phase3/                   # TC3.1–TC3.9 + integration
 │   ├── phase4/                   # TC4.1–TC4.12
+│   ├── phase5b/                  # TC5b.1–TC5b.8 + live latency join
 │   └── test_real_model.py        # marked real_model
-├── docs/measurements.md          # real measurements, labelled mock vs real
+├── docs/
+│   ├── measurements.md           # real measurements, labelled mock vs real
+│   ├── device_protocol.md        # normative serial protocol spec
+│   └── hardware.md               # wiring, e-stop, first-run safety checklist
 └── logs/                         # generated CSV/DB (gitignored)
 ```
 
@@ -144,6 +172,8 @@ in source, and API keys are never logged.
 | `ROUTER_ENDPOINTS` | empty | Comma-separated provider `/predict` URLs |
 | `MODEL_ID` | `PekingU/rtdetr_r18vd` | Real model (optional) |
 | `DETECTION_THRESHOLD` | `0.5` | Real model confidence threshold |
+| `ACTUATION_POLICY_PATH` | empty | JSON policy file; empty uses the built-in default (`hold`) |
+| `ACTUATION_SERIAL_PORT` | empty | Serial port for `--actuator serial`, e.g. `COM5` or `/dev/ttyUSB0` |
 
 ## Run it
 
@@ -333,6 +363,71 @@ python fault_drill.py
 `--source images` exists only as a plumbing smoke test when no camera is
 available; it is labelled as such in the generated report.
 
+## Phase 5b — actuator layer and device protocol
+
+Phase 5b connects the Phase 4 decision gate to a hand controller. The gate,
+policy and audit log stay on the edge; the device only executes validated
+commands.
+
+- **Actuator interface** — `grip`, `release`, `move_to`, `stop`, `heartbeat`.
+  `StubActuator` logs and ACKs immediately (default, no hardware),
+  `SerialActuator` speaks the line protocol over USB serial, and `SimActuator`
+  drives a PyBullet kinematic model (optional dependency).
+- **Policy** — the first matching rule over `(label, score)` selects an
+  action. An unknown label or a missing score falls through to `hold`, which
+  sends nothing. Rules and thresholds are JSON
+  (`actuator/policy.example.json`, loaded from `ACTUATION_POLICY_PATH` or
+  `--policy`); invalid configuration fails at load, not mid-actuation.
+- **At most one action per task** — `ActuationGrip` wraps the Phase 4
+  `DecisionGate` with the same `try_apply` signature. It claims `task_id` in
+  the new `actuation_log` table **before** sending, and the command id is
+  derived from `task_id` (`cmd-` + SHA-256 prefix). A duplicate delivery, a
+  second worker or an edge restart cannot actuate the same task twice. The
+  trade-off is fail-safe: a crash after the claim but before the send leaves
+  an unconfirmed row and no motion.
+- **Device protocol** — `command_id|command|parameters|checksum` frames
+  (FNV-1a 32-bit), `ACK`/`NACK` replies with a reason, angle 0–180° and speed
+  1–100 % limits, a 32-command-id dedup window, boot-safe state, and a servo
+  safe state after a heartbeat timeout. Full spec:
+  [`docs/device_protocol.md`](docs/device_protocol.md).
+- **`FakeDevice`** implements the same protocol in Python, so TC5b.6–TC5b.8
+  (checksum/format/NACK reasons, dedup window, limits, safe state) run in
+  pytest without hardware. `SerialActuator` is tested against it through the
+  real framing and ACK-matching path.
+- **`live_run.py`** records **capture → actuator ACK** latency on the edge
+  clock, ACK/NACK/hold counts and percentiles in `docs/live_results.md`, plus
+  one row per task (including holds) in `logs/live/<run>/actuation.csv`. `--actuator
+  stub|sim|serial`, `--serial-port` and `--policy` select the backend; the
+  default stub never moves anything.
+
+```bash
+python -m pytest tests/phase5b -q          # no hardware, no broker
+
+# Live run with the logging stub actuator (never moves anything)
+python live_run.py --duration 30 --fps 2 --actuator stub \
+  --endpoints http://127.0.0.1:8001/predict
+
+# Live run against a real controller; read docs/hardware.md first
+export ACTUATION_SERIAL_PORT=COM5
+python live_run.py --duration 30 --fps 1 --actuator serial \
+  --policy actuator/policy.example.json --endpoints ...
+```
+
+`actuation_log` columns: `task_id` (primary key), `command_id`, `action`,
+`parameters`, `acked`, `reason`, `detail`, `sent_at`, `acked_at`,
+`latency_ms`. Holds are logged with no `command_id` and no `acked_at` because
+nothing was sent. A row with a command id and no `acked_at` is an unconfirmed
+command; it is reported, never retried automatically.
+
+### Firmware and hardware status
+
+> **The firmware sketch in [`firmware/`](firmware/) is untested on hardware.**
+> It has never been compiled, flashed or run. The servo rail needs a separate
+> supply and a physical e-stop that cuts servo power. Wiring and the first-run
+> checklist are in [`docs/hardware.md`](docs/hardware.md). No physical robot
+> was driven in this workspace, and TC5b.4/TC5b.5 skip without a port and an
+> explicit opt-in.
+
 ## Tests
 
 The offline suite needs no Docker, credentials or internet:
@@ -352,22 +447,22 @@ python -m pytest -q
 | **TC2.1–2.6** | `phase2/` | 100 messages no loss, broker restart, edge restart, duplicate once, backoff, overhead (Docker) |
 | **TC3.1–3.9** | `phase3/` | Healthy routing, failure/timeout failover, both fail, three providers, recovery, latency preference, measured failover bound, 50 concurrent tasks |
 | **TC4.1–4.12** | `phase4/` | Context echo, claim race, discard reasons, mismatch rejection, 200 real claim-path trials, gate rules, safe default, 1000-task run, deadline timeout, crash/restart, late-after-B, edge kill/restart |
+| **TC5b.1–5b.8** | `phase5b/` | Stub actuator contract, policy mapping/validation, gate→actuator once per task with `actuation_log`, protocol checksum/ACK/NACK, 32-id dedup, limits and heartbeat safe state; TC5b.4/5b.5 are hardware-gated |
 
 ### Latest run
 
 ```bash
-# Phase 1 + Phase 3 + Phase 4 (skips real model and Docker integration)
-SKIP_PHASE2_DOCKER_TESTS=1 python -m pytest tests/test_tc1_1_single_request.py \
-  tests/test_tc1_2_batch.py tests/test_tc1_3_known_label.py \
-  tests/test_tc1_4_failure.py tests/test_real_model.py tests/phase3 tests/phase4 -q
-# 39 passed, 5 skipped, 0 failed
+# Full offline suite (skips real model, Docker and hardware tests)
+SKIP_PHASE2_DOCKER_TESTS=1 python -m pytest -q
+# 74 passed, 14 skipped, 0 failed
 
 python -m pytest tests/phase2 -q
 # 6 skipped — Docker not available
 ```
 
-Skipped and why: 4 real-model tests (`RUN_REAL_MODEL!=1`), 1 Phase 3
-Docker/broker integration test, and 6 Phase 2 Docker/broker tests.
+Skipped and why: 4 real-model tests (`RUN_REAL_MODEL!=1`), 1 Phase 3 and 6
+Phase 2 Docker/broker tests, 2 Phase 5b hardware-gated tests, and the optional
+PyBullet test.
 
 ## Measured numbers
 
@@ -391,12 +486,23 @@ Real, measured results only — no fabricated values. All sections are in
   server exists, but its benchmark was not run in this environment (model
   download and Python/torch compatibility).
 - **Camera path is simple.** One frame per request, no calibration; hardware
-  integration is Phase 5.
+  integration is Phase 5c.
+- **Firmware is untested.** The sketch in `firmware/` has never been compiled,
+  flashed or run; the protocol tests exercise `FakeDevice`, not the C++.
+- **No actuator hardware was run.** TC5b.4/5b.5 skip without a serial port and
+  explicit opt-in, and the `SimActuator` path was not exercised here because
+  `pybullet` is not installed.
+- **An ACK is not a finished motion.** The device ACKs command acceptance, so
+  capture→ACK latency does not include the physical move.
+- **The e-stop is hardware.** `stop` and the heartbeat safe state are software
+  behaviours and must not replace a physical switch that cuts servo power.
 - **Latency depends on host and frame size**, so compare runs on the same host.
 - **Mock providers over loopback** are used for Phase 3/4 measurements; they
   demonstrate routing/conflict behaviour, not WAN performance.
 
 ## Next phase
 
-Phase 5 integrates the physical robot hand: camera and sensor capture,
-actuator control, safety mechanisms and end-to-end field tests.
+Phase 5c is field integration: compile and flash the firmware, calibrate servo
+angles, complete the first-run safety checklist in `docs/hardware.md`, then
+connect the real camera and hand and measure capture → actuator ACK on the
+mechanism.

@@ -109,16 +109,28 @@ Notes: Mock providers created for scripted failures (can be made slow/fail on co
 
 
 
+
+
+
+
+
+
+
+
 <!-- TC3_8_FAILOVER:START -->
 ### TC3.8 worst-case failover time
 
 | Metric | Value |
 |---|---|
-| Worst-case failover time (ms) | 4.338 |
+| Worst-case failover time (ms) | 6.808 |
 | Attempts | 2 |
 | Routed to | mock_b |
 
 <!-- TC3_8_FAILOVER:END -->
+
+
+
+
 
 
 
@@ -142,17 +154,17 @@ Bound per run = connect_timeout (1.0s) + read_timeout (2.0s)
 
 | Run | Total ms | Bound ms | A call ms | B call ms (failover) | Connect ms | Breaker check ms | Health ms (off path) |
 |---|---|---|---|---|---|---|---|
-| 1 | 2015.4 | 3307.3 | 2008.0 | 7.3 | 0.74 | 0.0049 | 4.4 |
-| 2 | 2023.1 | 3306.0 | 2017.1 | 6.0 | 0.73 | 0.0049 | 4.0 |
-| 3 | 2007.7 | 3306.6 | 2001.0 | 6.6 | 0.86 | 0.0052 | 4.4 |
-| 4 | 2015.5 | 3307.0 | 2008.4 | 7.0 | 0.76 | 0.0038 | 3.1 |
-| 5 | 2010.5 | 3307.0 | 2003.4 | 7.0 | 0.74 | 0.0034 | 3.4 |
+| 1 | 2031.2 | 3320.0 | 2011.1 | 20.0 | 1.80 | 0.0082 | 4.6 |
+| 2 | 2013.3 | 3307.6 | 2005.6 | 7.6 | 1.58 | 0.0059 | 4.7 |
+| 3 | 2009.9 | 3307.0 | 2002.9 | 7.0 | 11.98 | 0.0130 | 4.6 |
+| 4 | 2012.6 | 3308.2 | 2004.3 | 8.2 | 15.72 | 0.0087 | 4.9 |
+| 5 | 2028.3 | 3319.5 | 2008.8 | 19.5 | 1.26 | 0.0040 | 5.0 |
 
 | Metric | Value |
 |---|---|
-| min total | 2007.7 ms |
-| median total | 2015.4 ms |
-| max total | 2023.1 ms |
+| min total | 2009.9 ms |
+| median total | 2013.3 ms |
+| max total | 2031.2 ms |
 | retries observed | 0 (one call per provider) |
 | sleeps on the request path | 0 |
 | health checks | background thread, not on the request path |
@@ -195,8 +207,8 @@ expired deadlines were configured by the test.
 | first 20 after A starts hanging (breaker closed) | 20 | 100% | A gets ~750 ms (1.5 s / 2 providers), B gets the rest |
 | first 20 after the breaker opened | 20 | 100% | A skipped, B answers immediately |
 
-Group 1 measured attempt budgets: [749.947, 749.972, 749.977, 749.983, 749.984, 749.985, 749.986, 749.987, 749.988, 749.989, 749.99, 749.991, 749.992, 898.197, 901.591, 911.479, 920.121, 921.89, 926.931, 927.406, 928.282, 928.29, 929.176, 929.327, 929.894, 930.125, 930.249, 930.285, 930.553, 930.665, 931.174, 931.214, 931.339] ms
-Group 1 elapsed: min 573 / median 577 / max 607 ms
+Group 1 measured attempt budgets: [749.976, 749.982, 749.983, 749.985, 749.986, 749.987, 749.988, 898.575, 898.998, 899.804, 900.066, 902.28, 903.02, 921.856, 926.443, 927.263, 928.837, 929.349, 929.691, 930.262, 930.594, 930.652, 930.719, 930.848, 931.046, 931.523, 932.726] ms
+Group 1 elapsed: min 573 / median 580 / max 609 ms
 Group 2 elapsed: min 4 / median 5 / max 6 ms
 <!-- TC4_9_DEADLINE_TIMEOUT:END -->
 
@@ -212,8 +224,8 @@ Injected (configured by the test, not observed rates):
 Observed outcomes:
 | Outcome | Count |
 |---|---|
-| applied (model decision) | 864 |
-| applied safe_default (organic provider failure before deadline) | 27 |
+| applied (model decision) | 818 |
+| applied safe_default (organic provider failure before deadline) | 73 |
 | safe_default from injected expired deadline (not applied) | 109 |
 | failed (no decision; organic) | 0 |
 | total tasks | 1000 |
@@ -228,8 +240,8 @@ Observed discards:
 | mismatch | 0 |
 
 Injected provider counters (from mock /control/stats):
-- HTTP 500 responses: 142
-- delayed responses: 146
+- HTTP 500 responses: 136
+- delayed responses: 136
 
 Organic observations:
 - late discards not attributable to injected expired deadlines: 0

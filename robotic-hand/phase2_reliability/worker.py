@@ -2,6 +2,7 @@
 skips duplicates but re-sends ACK, uses Router for multi-provider inference, publishes result and ACK."""
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -18,6 +19,14 @@ from phase2_reliability.config import Settings, load_settings
 from phase3_router import Router, HTTPProvider
 
 LOG = logging.getLogger("phase2.worker")
+
+
+def _accepts_score(gate) -> bool:
+    """True when ``gate.try_apply`` can take a Phase 5b confidence score."""
+    try:
+        return "score" in inspect.signature(gate.try_apply).parameters
+    except (TypeError, ValueError):
+        return False
 
 PROCESSED_SCHEMA = """
 CREATE TABLE IF NOT EXISTS processed_ids (
@@ -209,7 +218,14 @@ class Worker:
         }
         if self.decision_gate is not None:
             try:
-                self.decision_gate.try_apply(message.message_id, decision, task_context["frame_timestamp"], task_context["deadline"])
+                score = getattr(rres, "score", None)
+                gate_kwargs = {}
+                if score is not None and _accepts_score(self.decision_gate):
+                    gate_kwargs["score"] = score
+                self.decision_gate.try_apply(
+                    message.message_id, decision, task_context["frame_timestamp"],
+                    task_context["deadline"], **gate_kwargs,
+                )
             except Exception:
                 pass
         return result_dict
