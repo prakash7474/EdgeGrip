@@ -441,7 +441,7 @@ python -m pytest -q
 | **TC1.2** | `test_tc1_2_batch.py` | 20 requests complete, CSV rows in order, avg/min/max match recomputation |
 | **TC1.3** | `test_tc1_3_known_label.py` | Labelled samples return expected labels; repeats and unknown images are stable |
 | **TC1.4** | `test_tc1_4_failure.py` | Timeout, refused connection and invalid payload are caught, logged, and the client continues |
-| **TC2.1–2.6** | `phase2/` | 100 messages no loss, broker restart, edge restart, duplicate once, backoff, overhead (Docker) |
+| **TC2.1–2.6** | `phase2/` | 100 messages all acked in the test, broker restart, edge restart, duplicate once, backoff, overhead (Docker) |
 | **TC3.1–3.9** | `phase3/` | Healthy routing, failure/timeout failover, both fail, three providers, recovery, latency preference, measured failover bound, 50 concurrent tasks |
 | **TC4.1–4.12** | `phase4/` | Context echo, claim race, discard reasons, mismatch rejection, 200 real claim-path trials, gate rules, safe default, 1000-task run, deadline timeout, crash/restart, late-after-B, edge kill/restart |
 | **TC5b.1–5b.8** | `phase5b/` | Stub actuator contract, policy mapping/validation, gate→actuator once per task with `actuation_log`, protocol checksum/ACK/NACK, 32-id dedup, limits and heartbeat safe state; TC5b.4/5b.5 are hardware-gated |

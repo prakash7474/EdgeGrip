@@ -231,7 +231,7 @@ def test_tc4_2_results_claim_first_writer_wins_concurrent(tmp_path):
 
 
 def test_tc4_3_discarded_table_records_reasons(tmp_path):
-    """Spec 3: duplicate|late|mismatch are all recorded, never dropped silently."""
+    """Spec 3: duplicate|late|mismatch are all recorded in the discard log."""
     store = ConflictStore(tmp_path / "conflict.db")
     store.record_discard("t1", "p1", "duplicate")
     store.record_discard("t2", "p1", "late")

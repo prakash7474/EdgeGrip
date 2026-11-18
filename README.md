@@ -134,8 +134,9 @@ claims found, and what they now say:
 | "Zero data loss on disconnect" | README | "No message loss in the tested failure modes" |
 | "exactly-once application" | README | "at most one application per task in the tested scenarios" |
 | "100 messages … 0 lost" (test docstring) | tests/phase2/test_tc2_1_healthy.py | "100 messages all acked in this test" |
-| "processed exactly once" | docs/measurements.md, tests/phase2/test_tc2_6_latency_overhead.py | "processed once in the duplicate-delivery test" |
-| "never dropped silently" | docs/PHASES.md | "recorded in the discard log" |
+| "processed exactly once" | tests/phase2/test_tc2_4_duplicate.py, docs/measurements.md, tests/phase2/test_tc2_6_latency_overhead.py | "processed once in the duplicate-delivery test" |
+| "100 messages no loss" | docs/PHASES.md | "100 messages all acked in the test" |
+| "never dropped silently" | docs/PHASES.md, tests/phase4/test_tc4_conflict.py | "recorded in the discard log" |
 | "same task is applied exactly once" | docs/PHASES.md | "the same task is not applied twice in the tested crash/restart scenarios" |
 
 The durable outbox, QoS 1, ACK-driven retry, deduplication and claims are

@@ -1,4 +1,4 @@
-"""TC2.4 — same message_id sent twice: processed exactly once."""
+"""TC2.4 — same message_id sent twice: processed once in this test."""
 from __future__ import annotations
 
 import os
