@@ -1,4 +1,4 @@
-"""TC2.1 — 100 messages, healthy network: all acked, 0 lost."""
+"""TC2.1 — 100 messages, healthy network: all acked in this test."""
 from __future__ import annotations
 
 import os

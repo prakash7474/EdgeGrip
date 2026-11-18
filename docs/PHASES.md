@@ -289,7 +289,7 @@ Mock providers echo `task_id`; the router rejects a mismatch and logs it.
 | Table | Purpose |
 |---|---|
 | `results(task_id PRIMARY KEY, provider, decision, claimed_at)` | Claimed with `INSERT … ON CONFLICT DO NOTHING`; first writer wins |
-| `discarded(task_id, provider, reason, received_at)` | `duplicate`, `late`, `mismatch` — never dropped silently |
+| `discarded(task_id, provider, reason, received_at)` | `duplicate`, `late`, `mismatch` — recorded in the discard log |
 | `applied_ids(task_id PRIMARY KEY, frame_timestamp, frame_ts_num, decision, applied_at)` | Robot gate state; survives restarts |
 
 The decision gate applies a decision only when it is not already applied, the
@@ -308,7 +308,7 @@ reported as a late-answer rate. See `docs/measurements.md`.
 
 TC4.10 (crash after inference, before ACK) and TC4.11 (edge process killed
 mid-task, restarted in a separate process) run real subprocesses and verify the
-same task is applied exactly once.
+the same task is not applied twice in the tested crash/restart scenarios.
 
 ## Phase 5a — live cloud test harness
 

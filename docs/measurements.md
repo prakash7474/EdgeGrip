@@ -46,7 +46,7 @@ _Run: 2026-11-04T06:00:00Z · mode: `mock` (broker local) · guarantee: `no mess
 | Messages tested (TC2.1) | 100 |
 | Broker restart delivery (TC2.2) | 100/100 (by design) |
 | Restart with pending (TC2.3) | verified by test logic |
-| Duplicate suppression (TC2.4) | processed exactly once (worker dedup + ACK resend) |
+| Duplicate suppression (TC2.4) | processed once in the duplicate-delivery test (worker dedup + ACK resend) |
 | Retry/backoff (TC2.5) | 1s, 2s, 4s, capped at 30s |
 | Overhead vs Phase 1 baseline (avg) | Additional latency from MQTT/ACK/worker path; measured per scripted run (recorded when tests execute with broker) |
 
@@ -117,16 +117,19 @@ Notes: Mock providers created for scripted failures (can be made slow/fail on co
 
 
 
+
+
 <!-- TC3_8_FAILOVER:START -->
 ### TC3.8 worst-case failover time
 
 | Metric | Value |
 |---|---|
-| Worst-case failover time (ms) | 6.808 |
+| Worst-case failover time (ms) | 7.811 |
 | Attempts | 2 |
 | Routed to | mock_b |
 
 <!-- TC3_8_FAILOVER:END -->
+
 
 
 
@@ -154,17 +157,17 @@ Bound per run = connect_timeout (1.0s) + read_timeout (2.0s)
 
 | Run | Total ms | Bound ms | A call ms | B call ms (failover) | Connect ms | Breaker check ms | Health ms (off path) |
 |---|---|---|---|---|---|---|---|
-| 1 | 2031.2 | 3320.0 | 2011.1 | 20.0 | 1.80 | 0.0082 | 4.6 |
-| 2 | 2013.3 | 3307.6 | 2005.6 | 7.6 | 1.58 | 0.0059 | 4.7 |
-| 3 | 2009.9 | 3307.0 | 2002.9 | 7.0 | 11.98 | 0.0130 | 4.6 |
-| 4 | 2012.6 | 3308.2 | 2004.3 | 8.2 | 15.72 | 0.0087 | 4.9 |
-| 5 | 2028.3 | 3319.5 | 2008.8 | 19.5 | 1.26 | 0.0040 | 5.0 |
+| 1 | 2010.6 | 3306.5 | 2004.1 | 6.5 | 1.91 | 0.0217 | 5.7 |
+| 2 | 2016.8 | 3309.6 | 2007.2 | 9.6 | 0.99 | 0.0052 | 4.3 |
+| 3 | 2022.2 | 3307.5 | 2014.7 | 7.5 | 1.42 | 0.0041 | 3.5 |
+| 4 | 2021.4 | 3319.7 | 2001.7 | 19.7 | 1.17 | 0.0034 | 3.4 |
+| 5 | 2014.0 | 3308.2 | 2005.8 | 8.2 | 1.42 | 0.0043 | 4.2 |
 
 | Metric | Value |
 |---|---|
-| min total | 2009.9 ms |
-| median total | 2013.3 ms |
-| max total | 2031.2 ms |
+| min total | 2010.6 ms |
+| median total | 2016.8 ms |
+| max total | 2022.2 ms |
 | retries observed | 0 (one call per provider) |
 | sleeps on the request path | 0 |
 | health checks | background thread, not on the request path |
@@ -207,9 +210,9 @@ expired deadlines were configured by the test.
 | first 20 after A starts hanging (breaker closed) | 20 | 100% | A gets ~750 ms (1.5 s / 2 providers), B gets the rest |
 | first 20 after the breaker opened | 20 | 100% | A skipped, B answers immediately |
 
-Group 1 measured attempt budgets: [749.976, 749.982, 749.983, 749.985, 749.986, 749.987, 749.988, 898.575, 898.998, 899.804, 900.066, 902.28, 903.02, 921.856, 926.443, 927.263, 928.837, 929.349, 929.691, 930.262, 930.594, 930.652, 930.719, 930.848, 931.046, 931.523, 932.726] ms
-Group 1 elapsed: min 573 / median 580 / max 609 ms
-Group 2 elapsed: min 4 / median 5 / max 6 ms
+Group 1 measured attempt budgets: [749.982, 749.983, 749.985, 749.986, 749.987, 749.988, 749.989, 749.99, 749.991, 749.992, 911.385, 925.559, 925.927, 926.332, 926.87, 926.945, 926.953, 926.986, 927.215, 927.607, 928.26, 928.37, 928.851, 929.07, 929.229, 929.636, 929.748, 929.775, 930.025, 931.065] ms
+Group 1 elapsed: min 575 / median 579 / max 595 ms
+Group 2 elapsed: min 5 / median 6 / max 7 ms
 <!-- TC4_9_DEADLINE_TIMEOUT:END -->
 
 <!-- TC4_8_FULL_WORKER:START -->
@@ -224,8 +227,8 @@ Injected (configured by the test, not observed rates):
 Observed outcomes:
 | Outcome | Count |
 |---|---|
-| applied (model decision) | 818 |
-| applied safe_default (organic provider failure before deadline) | 73 |
+| applied (model decision) | 854 |
+| applied safe_default (organic provider failure before deadline) | 37 |
 | safe_default from injected expired deadline (not applied) | 109 |
 | failed (no decision; organic) | 0 |
 | total tasks | 1000 |
@@ -240,8 +243,8 @@ Observed discards:
 | mismatch | 0 |
 
 Injected provider counters (from mock /control/stats):
-- HTTP 500 responses: 136
-- delayed responses: 136
+- HTTP 500 responses: 140
+- delayed responses: 144
 
 Organic observations:
 - late discards not attributable to injected expired deadlines: 0

@@ -2,187 +2,223 @@
 
 # Robotic Hand — Edge/Cloud AI Pipeline
 
-![Status](https://img.shields.io/badge/status-implemented%20phases%201%E2%80%935b%20%28firmware%20untested%29-2E7D32)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-edge%20%2B%20cloud-6B7280)
 
-AI-assisted robotic hand for small-scale industrial automation. Perception and decision-making run on whichever compute is available — an on-site GPU if the factory has one, a rented cloud GPU if it doesn't — connected through a reliable messaging layer so no sensor reading or command is lost if the network drops.
-
-The implementation lives at the repository root ([`docs/PHASES.md`](docs/PHASES.md)). Phases 1–5b are implemented and tested offline: baseline pipeline, reliable MQTT delivery, multi-provider routing, conflict-safe decision handling, and an actuator layer with a serial device protocol. The Phase 5b firmware sketch is **untested on real hardware**; no physical robot has been driven.
-
-## Table of contents
-
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Tech stack](#tech-stack)
-- [Getting started](#getting-started)
-- [Project structure](#project-structure)
-- [Reliability](#reliability-how-data-loss-is-actually-prevented)
-- [Security](#security)
-- [Monitoring](#monitoring)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
-- [License](#license)
-
-## Overview
-
-Most small manufacturers can't justify a dedicated on-site AI server just to add vision-guided automation. This project's premise: keep the robot hand's safety-critical motor control fully local, and let the perception/decision step run wherever makes sense — locally if the factory already has a GPU, in the cloud if it doesn't — without the robot ever losing data when the connection is unstable.
-
-This repository contains a working reference implementation plus the original single-provider prototype.
-
-### Implemented phases
-
-| Phase | What it adds | Where |
-|---|---|---|
-| **1 — baseline** | Capture → HTTP inference → measured latency; deterministic offline mock server; optional real RT-DETR endpoint | [``](README.md) |
-| **2 — reliable delivery** | SQLite outbox written before send, Mosquitto/MQTT QoS 1, ACKs, exponential backoff, restart recovery, worker dedup | [`phase2_reliability/`](phase2_reliability/) |
-| **3 — multi-provider routing** | Health checks, circuit breaker, EWMA preference, sequential failover, shared sessions, deadline-derived timeouts | [`phase3_router/`](phase3_router/) |
-| **4 — conflict handling** | Task context end to end, first-writer-wins result claims, discard log, robot decision gate, safe defaults, exactly-once application | [`phase4_conflict/`](phase4_conflict/) |
-| **5a — deployment harness** | Token-authenticated container image, live latency/fault drills, cloud deployment notes | [`live_run.py`](live_run.py), [`docs/deploy.md`](docs/deploy.md) |
-| **5b — actuation** | Actuator interface (stub/serial/sim), config-driven policy, gate → one action per task, checksummed serial protocol, fake device, firmware sketch and hardware safety notes | [`actuator/`](actuator/), [`firmware/`](firmware/), [`docs/device_protocol.md`](docs/device_protocol.md) |
-
-## Features
-
-- **Hybrid inference routing** — prefers local GPU compute when available, falls back to cloud automatically
-- **Zero data loss on disconnect** — local buffering and durable message delivery, not best-effort
-- **Safety-first local control** — motor control and e-stop logic never depend on the network; the device refuses motion without heartbeats and a physical e-stop is required
-- **Auditable actuation** — one logged action per task, with the device ACK/NACK reason and capture-to-ACK latency
-- **Hardware-agnostic cloud path** — works with any production-grade rented GPU inference service
-- **Model sync** — local and cloud inference paths kept on compatible model versions
+Small manufacturers often cannot justify a dedicated on-site AI server for
+vision-guided automation. This project keeps the robotic hand's motor control
+and safety stops local, while the perception/decision step runs on whichever
+compute is available — an on-site GPU when the factory has one, a rented cloud
+GPU when it does not — connected by a durable MQTT path so a network drop does
+not lose work in the failure modes that were tested. The repository is a
+reference implementation of that split: camera capture, a SQLite outbox,
+Mosquitto delivery, multi-provider routing, conflict-safe claims, a robot-side
+decision gate, and a serial actuator protocol. The firmware and the physical
+hand remain untested.
 
 ## Architecture
 
 ![Architecture diagram](architecture-diagram.svg)
 
-**Pipeline (as implemented):**
+A frame is captured on the edge, written to a SQLite outbox as `pending`
+*before* it is published, and sent over MQTT QoS 1. The worker deduplicates by
+`task_id` and asks the router for a decision; the router checks provider
+health, respects a circuit breaker, prefers the lowest recent latency, and
+fails over sequentially within the task deadline. Results are claimed with
+`INSERT … ON CONFLICT DO NOTHING`, so the first valid writer wins. The robot
+gate applies a decision only if it is not already applied, the deadline has
+not passed, and no newer frame has been decided; otherwise it falls back to a
+safe default. A configurable policy maps the decision to at most one actuator
+action, claimed in `actuation_log` before anything is sent.
 
-1. **Robot** — camera and sensors capture data locally; motor control and safety stops run on-device, independent of network state.
-2. **Edge controller** — assigns a `task_id` (UUID4), attempt number, frame timestamp and deadline; writes the frame to a SQLite outbox as `pending` *before* sending, then publishes with MQTT QoS 1.
-3. **Message broker (MQTT/Mosquitto)** — delivers frames and ACKs; unacked messages are resent with exponential backoff (1 s, 2 s, 4 s, capped at 30 s) and drained oldest-first after an outage or restart.
-4. **Worker** — deduplicates by `task_id`, runs the router, and records the outcome. Results are claimed with `INSERT … ON CONFLICT DO NOTHING`, so the first valid writer wins.
-5. **Router** — skips unhealthy providers (background health checks), respects a circuit breaker, prefers the lowest recent latency, and fails over **sequentially**. Each attempt's timeout is derived from the remaining deadline divided by the remaining providers, with a floor.
-6. **Providers** — deterministic controllable mock providers for tests, plus an optional real RT-DETR endpoint. Each response echoes `task_id`; a mismatch is rejected and logged.
-7. **Decision gate (robot side)** — applies a decision only if it is not already applied, the deadline has not passed, and no newer frame has already been decided. Expired deadlines fall back to a safe default; a later answer is logged as `late` and never applied.
-8. **Actuation** — the gate's decision is mapped by a configurable `(label, score)` policy to at most one action, claimed in `actuation_log` before sending. The actuator speaks a checksummed line protocol; the firmware enforces angle/speed limits, command-id dedup and a heartbeat safe state. Default is `hold`, which sends nothing.
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Tech stack
+## Phase status
 
-| Concern | Implemented / recommended | Notes |
+| Phase | Built | Tested offline | Tested with broker/Docker or real cloud/hardware |
+|---|---|---|---|
+| **1 — baseline pipeline** | Yes | Yes — capture, mock HTTP inference, latency CSV | **No real cloud run.** No hosted provider was called. The local real-model server was attempted but did not start, so it produced no inference measurement. |
+| **2 — reliable delivery** | Yes | Partial — outbox and message code are exercised by offline Phase 4 tests | **No local broker run recorded.** The Docker daemon was unavailable here, so all six Phase 2 broker tests skipped. A CI job is defined but has not run yet. |
+| **3 — multi-provider routing** | Yes | Yes — in-process mock providers | **No local broker run.** The Phase 3 worker/router/broker integration test skipped with Docker unavailable. |
+| **4 — conflict handling** | Yes | Yes — claim races, restarts and 1000-task worker path | Broker not required for these tests. No real-cloud run. |
+| **5a — deployment harness** | Yes | Yes — token enforcement and client/provider token handling | **No real cloud deployment.** No VM was provisioned and no hosted endpoint was called. |
+| **5b — actuation** | Yes | Yes — stub actuator, fake device, serial path over a fake transport | **No real hardware.** The firmware sketch has never been compiled, flashed or run; hardware-gated tests skipped. |
+
+## Test status
+
+Collected from the repository with `python -m pytest --collect-only -q`
+(88 tests). Statuses below are from the offline run in this workspace on
+Windows 11 with Python 3.14.5:
+
+```text
+74 passed, 14 skipped
+```
+
+<!-- TEST_TABLE_START -->
+| Test ID | Test file | Status |
 |---|---|---|
-| Edge runtime | Python 3.10+ (verified on 3.14.5) | OpenCV capture, `requests`, SQLite outbox |
-| Messaging | MQTT — Mosquitto (Docker Compose) | QoS 1, ACK topic, durable outbox |
-| Multi-provider routing | `phase3_router` with HTTP providers | Health checks, circuit breaker, EWMA preference |
-| Conflict handling | SQLite `results`, `discarded`, `applied_ids` | First-writer-wins claims, exactly-once application |
-| Mock inference | FastAPI deterministic mock servers | Offline, controllable failure/slow/hang for tests |
-| Real inference (optional) | RT-DETR (`PekingU/rtdetr_r18vd`) via `real_server` | Requires `requirements-real.txt` and model download |
-| Edge hardware | NVIDIA Jetson Orin Nano (recommended) | Local inference path; not integrated in this phase |
-| Transport | Wired Ethernet where possible | More reliable and lower-latency than shared WiFi |
+| TC1.1 | tests/test_tc1_1_single_request.py | Passed (4 tests) |
+| TC1.2 | tests/test_tc1_2_batch.py | Passed (3 tests) |
+| TC1.3 | tests/test_tc1_3_known_label.py | Passed (3 tests) |
+| TC1.4 | tests/test_tc1_4_failure.py | Passed (5 tests) |
+| TC2.1 | tests/phase2/test_tc2_1_healthy.py | Skipped — Docker daemon unavailable locally |
+| TC2.2 | tests/phase2/test_tc2_2_broker_restart.py | Skipped — Docker daemon unavailable locally |
+| TC2.3 | tests/phase2/test_tc2_3_restart_pending.py | Skipped — Docker daemon unavailable locally |
+| TC2.4 | tests/phase2/test_tc2_4_duplicate.py | Skipped — Docker daemon unavailable locally |
+| TC2.5 | tests/phase2/test_tc2_5_retry_backoff.py | Skipped — Docker daemon unavailable locally |
+| TC2.6 | tests/phase2/test_tc2_6_latency_overhead.py | Skipped — Docker daemon unavailable locally |
+| TC3.1 | tests/phase3/test_tc3_router.py | Passed |
+| TC3.2 | tests/phase3/test_tc3_router.py | Passed |
+| TC3.3 | tests/phase3/test_tc3_router.py | Passed |
+| TC3.4 | tests/phase3/test_tc3_router.py | Passed |
+| TC3.5 | tests/phase3/test_tc3_router.py | Passed |
+| TC3.6 | tests/phase3/test_tc3_extra.py | Passed |
+| TC3.7 | tests/phase3/test_tc3_extra.py | Passed |
+| TC3.8 | tests/phase3/test_tc3_extra.py, tests/phase3/test_tc3_refactor.py | Passed (2 tests) |
+| TC3.9 | tests/phase3/test_tc3_extra.py | Passed |
+| TC3-integration | tests/phase3/test_tc3_extra.py | Skipped — Docker daemon unavailable locally |
+| TC3-unit | tests/phase3/test_tc3_refactor.py | Passed (circuit breaker and health-thread tests) |
+| TC4.1 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.2 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.3 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.4 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.5 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.6 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.7 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.8 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.9 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.10 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.11 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC4.12 | tests/phase4/test_tc4_conflict.py | Passed |
+| TC5a | tests/test_phase5a_token.py | Passed (6 tests) |
+| TC5b.1 | tests/phase5b/test_tc5b_actuator.py | Passed |
+| TC5b.2 | tests/phase5b/test_tc5b_actuator.py | Passed (12 tests) |
+| TC5b.3 | tests/phase5b/test_tc5b_actuator.py | Passed (4 tests) |
+| TC5b.4 | tests/phase5b/test_tc5b_actuator.py | Hardware-gated — skipped, no serial device |
+| TC5b.5 | tests/phase5b/test_tc5b_actuator.py | Hardware-gated — skipped, no serial device |
+| TC5b.6 | tests/phase5b/test_tc5b_actuator.py | Passed (3 tests) |
+| TC5b.7 | tests/phase5b/test_tc5b_actuator.py | Passed (3 tests) |
+| TC5b.8 | tests/phase5b/test_tc5b_actuator.py | Passed (3 tests) |
+| TC5b-sim | tests/phase5b/test_tc5b_actuator.py | Skipped — optional pybullet package not installed |
+| TC5b-live | tests/phase5b/test_tc5b_live_latency.py | Passed (3 tests) |
+| REAL-MODEL | tests/test_real_model.py | Skipped — RUN_REAL_MODEL not set; no model download or real inference run |
+<!-- TEST_TABLE_END -->
 
-## Getting started
+`python -m scripts.check_docs` verifies that every test ID in this table maps
+to a collected test and every collected test has a row.
 
-**Prerequisites**
-- Python 3.10+ (verified on 3.14.5)
-- Docker Desktop / Docker Engine for the Mosquitto broker (Phase 2 integration tests)
-- No camera, GPU or API key is needed for the offline tests
+## Measured results
 
-```bash
-# clone the repo
-git clone https://github.com/your-org/robotic-hand.git
-cd robotic-hand
+Every number below is labelled with the environment that produced it. Nothing
+here is a cloud-latency measurement. Full records are in
+[docs/measurements.md](docs/measurements.md).
 
+| Measurement | Value | Environment |
+|---|---|---|
+| Phase 1 round trip, 20 requests | avg 23.876 ms, min 6.039 ms, max 61.604 ms | **Loopback mock** (`127.0.0.1`, local FastAPI mock server) |
+| Phase 3 worst-case failover | 6.808 ms | **Loopback mock** providers, local process |
+| Phase 3 hanging-provider failover, 5 runs | min 2009.9 ms, median 2013.3 ms, max 2031.2 ms | **Loopback mock**, 2.0 s read timeout, one failover call |
+| Phase 4 claim-path trials | 200 trials, 0 invariant violations | **Loopback mock** providers |
+| Phase 4 1000-task worker run | 0 tasks applied more than once; 0 organic failures | **Loopback mock** providers and local SQLite |
+| Real model (RT-DETR), local | 0 requests completed; server did not start | **Real model, local** — attempted, not executed |
+| Real cloud inference | No run recorded | **Real cloud** — not tested |
+| Actuator capture→ACK | No run recorded | **Real hardware** — not tested; stub/fake only |
+
+## Claims audit
+
+The repository was searched for absolute reliability wording. These were the
+claims found, and what they now say:
+
+| Original claim | Location | Replacement |
+|---|---|---|
+| "Zero data loss on disconnect" | README | "No message loss in the tested failure modes" |
+| "exactly-once application" | README | "at most one application per task in the tested scenarios" |
+| "100 messages … 0 lost" (test docstring) | tests/phase2/test_tc2_1_healthy.py | "100 messages all acked in this test" |
+| "processed exactly once" | docs/measurements.md, tests/phase2/test_tc2_6_latency_overhead.py | "processed once in the duplicate-delivery test" |
+| "never dropped silently" | docs/PHASES.md | "recorded in the discard log" |
+| "same task is applied exactly once" | docs/PHASES.md | "the same task is not applied twice in the tested crash/restart scenarios" |
+
+The durable outbox, QoS 1, ACK-driven retry, deduplication and claims are
+tested against the failure modes listed in
+[docs/TESTING.md](docs/TESTING.md). They are not a proof of losslessness for
+untested failures such as storage corruption, a disk full during the claim
+write, or a device that never returns an ACK.
+
+## Known limitations
+
+- **Single-machine SQLite claim store.** `results`, `discarded`, `applied_ids`
+  and `actuation_log` live in one SQLite file. There is no replication or
+  multi-machine consensus; two edge machines with separate databases are not
+  covered.
+- **Plain-HTTP tokens.** `real_server` authenticates `/predict` with an
+  `X-API-Token` header over plain HTTP unless a TLS proxy is added. The token is
+  not encrypted in transit by this code, and there is no key rotation.
+- **COCO-only model.** The optional RT-DETR model
+  (`PekingU/rtdetr_r18vd`) is COCO-trained and does not know factory-specific
+  parts. The offline mock labels come from a hash manifest and measure plumbing,
+  not accuracy.
+- **Firmware untested on hardware.** The sketch in `firmware/` has never been
+  compiled, flashed or run. Protocol behaviour is verified against
+  `FakeDevice`, not the C++ implementation.
+- **Broker and worker run on the edge machine.** Mosquitto and the worker are
+  expected on the same machine as the capture process. Only inference endpoints
+  are remote. This avoids WAN broker latency but is not a distributed
+  deployment.
+- **Mock-only latency unless real runs are recorded.** All latency and failover
+  numbers above come from loopback mock servers. No real-cloud or real-provider
+  latency was measured.
+- **No hardware actuation was run.** No physical hand was moved. The `stop`,
+  heartbeat safe state and limits are software behaviours and must not replace
+  a physical e-stop that cuts servo power.
+- **Optional simulation not exercised.** The PyBullet `SimActuator` test skips
+  because `pybullet` is not installed in this environment.
+
+## Quickstart (Windows PowerShell)
+
+These commands were executed in this workspace. They install the offline
+dependencies, create a local `.env`, and run the offline suite. The suite still
+skips the real-model, broker/Docker and hardware cases as described above.
+
+```powershell
+python --version
 python -m venv .venv
-source .venv/Scripts/activate   # Windows (Git Bash); use .venv/bin/activate elsewhere
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-cp .env.example .env
-
-# optional: local broker for the MQTT path
-docker compose up -d
-
-# terminal 1: deterministic mock inference server
-python -m mock_server --port 8000
-
-# terminal 2: run the offline test suite (no broker, camera or credentials)
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+$env:SKIP_PHASE2_DOCKER_TESTS = "1"
+python -m pytest --collect-only -q
 python -m pytest -q
-
-# optional: optional real model server (large download)
-pip install -r requirements-real.txt
-python -m real_server --port 8001
 ```
 
-See [`docs/PHASES.md`](docs/PHASES.md) for each phase's commands, configuration and measurements.
+Start the deterministic mock inference server and check it:
 
-## Project structure
-
-```
-.
-├── README.md                  # phase-by-phase documentation and commands
-├── .env.example / .gitignore
-├── requirements.txt / requirements-real.txt
-├── docker-compose.yml         # Mosquitto broker for Phase 2
-├── mosquitto/                 # broker configuration
-├── images/                    # sample frames + labels.json
-├── mock_server/               # deterministic HTTP inference mock
-├── real_server/               # optional RT-DETR endpoint
-├── phase1_pipeline/           # capture, HTTP client, benchmark
-├── phase2_reliability/        # outbox, publisher, worker, common/config
-├── phase3_router/             # router, health checks, providers
-├── phase4_conflict/           # task context, claims, discard log, decision gate
-├── actuator/                  # interface, policy, actuation log, protocol, fake device
-├── firmware/                  # ESP32/Arduino sketch (untested on hardware)
-├── benchmarks/                # router overhead benchmark
-├── tests/                     # TC1.x, phase2, phase3, phase4, phase5b suites
-└── docs/                      # measurements, device protocol, hardware safety
+```powershell
+Start-Process python -ArgumentList '-m','mock_server','--port','8000' -PassThru
+Start-Sleep -Seconds 4
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/health).Content
 ```
 
-## Reliability: how data loss is actually prevented
+The health response was:
 
-Individual packet loss within a connection is already handled by the transport layer (TCP, which MQTT and gRPC sit on top of) — packets lost mid-transmission are automatically detected and resent. The real risk is a **full connection drop**, and what happens to data generated during that gap.
+```json
+{"status":"ok","model":"mock-vit-b16","known_images":3}
+```
 
-| Layer | Mechanism | Failure it protects against |
-|---|---|---|
-| Edge controller | SQLite outbox written as `pending` before every send | Data loss during an outage or process kill |
-| Publisher | QoS 1 + ACK-driven `acked` state, backoff resend | Lost or unacknowledged delivery |
-| Broker | MQTT QoS 1; duplicate delivery is expected and handled | Duplicated delivery across an unstable link |
-| Worker | `processed_ids` dedup, re-ACK on duplicate | Double processing of a redelivered frame |
-| Router | Health checks, circuit breaker, sequential failover, deadline-derived timeouts | Hanging or failed provider blocking the task |
-| Results store | `INSERT … ON CONFLICT DO NOTHING` claim | Two providers/workers applying different answers |
-| Robot gate | `applied_ids` + deadline + newer-frame check | Re-applying, applying late, or overwriting a newer decision |
-| Robot | Timeout → safe default; late answers logged and discarded | Indefinite hang if no response ever arrives |
+Docker, broker, real-model and hardware commands are documented in
+[docs/TESTING.md](docs/TESTING.md); they were not run in this workspace.
 
-## Security
+## Documentation
 
-- TLS/mTLS on every connection between robot, broker, and processing endpoints
-- Per-device certificates for authentication — don't leave factory-floor devices open on the network
-- Confirm data residency/retention policy with the factory before any camera footage leaves the site
-
-## Monitoring
-
-Track and alert on:
-- End-to-end latency (robot → decision → robot)
-- Local vs. cloud routing ratio, failover events, router overhead
-- Outbox depth, retry rate and timeout rate
-- Discard counts by reason (`duplicate`, `late`, `mismatch`)
-- Safe-default rate and any task applied more than once (must be zero)
-
-## Roadmap
-
-- [x] Edge controller reference implementation (capture, outbox, publisher)
-- [x] MQTT broker config + QoS policy (Mosquitto, QoS 1, ACKs)
-- [x] Cloud inference path + reliable delivery (worker, retries, dedup)
-- [x] Multi-provider routing with health checks and failover
-- [x] Conflict handling: task IDs, claims, decision gate, safe defaults
-- [x] Actuator layer, policy, device protocol, fake device and hardware safety docs (firmware sketch written but untested on hardware)
-- [ ] Local GPU inference path on Jetson-class hardware
-- [ ] Hardware integration with the robot hand (compile/flash firmware, calibrate, first-run checklist)
-- [ ] Field test in a single factory with no on-site GPU
-- [ ] Field test in a factory with an on-site GPU
-
-## Contributing
-
-Phases 1–5b are implemented and tested offline; the firmware sketch is untested on real hardware. Issues and pull requests that correct behaviour, extend test coverage, or add hardware integration notes are welcome. Please open an issue describing the change before submitting a large pull request.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — diagram, data flow, deadlines
+  and claim-before-send logic.
+- [docs/TESTING.md](docs/TESTING.md) — offline, broker, real-model and
+  hardware-gated test tiers.
+- [docs/PHASES.md](docs/PHASES.md) — phase-by-phase implementation notes and
+  commands.
+- [docs/measurements.md](docs/measurements.md) — measured results with
+  environment labels.
+- [docs/device_protocol.md](docs/device_protocol.md) and
+  [docs/hardware.md](docs/hardware.md) — serial protocol and hardware safety.
 
 ## License
 
-MIT — replace with your preferred license before publishing.
+MIT — see [LICENSE](LICENSE).

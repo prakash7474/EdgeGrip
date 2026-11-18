@@ -75,7 +75,7 @@ def test_tc2_6_latency_overhead_recorded():
     block.append(f"| Messages tested (TC2.1) | 100 |")
     block.append(f"| Broker restart delivery (TC2.2) | 100/100 |")
     block.append(f"| Restart with pending (TC2.3) | verified |")
-    block.append(f"| Duplicate suppression (TC2.4) | processed exactly once |")
+    block.append(f"| Duplicate suppression (TC2.4) | processed once in the duplicate-delivery test |")
     block.append(f"| Retry/backoff (TC2.5) | 1s,2s,4s capped at 30s |")
     block.append(f"| Overhead vs Phase 1 baseline (avg) | measured in this run (see CSV/logs) |")
     block.append("")
