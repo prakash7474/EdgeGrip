@@ -640,6 +640,7 @@ def test_tc5b_8_heartbeat_timeout_is_configurable_and_refreshed():
 
 
 # ------------------------------------------------------- optional simulation
+@pytest.mark.pybullet
 def test_tc5b_sim_optional_pybullet_backend():
     """The simulation backend is optional; report a skip when it is absent."""
     pytest.importorskip("pybullet", reason="SimActuator needs the optional pybullet package")
