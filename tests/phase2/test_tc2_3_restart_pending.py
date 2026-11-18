@@ -1,8 +1,7 @@
-"""TC2.4 — same message_id sent twice: processed exactly once."""
+"""TC2.3 — kill the edge process with pending messages, restart: they are delivered."""
 from __future__ import annotations
 
 import os
-import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -17,11 +16,11 @@ from phase1_pipeline.capture import FrameGrabber
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ROBOTIC_HAND = PROJECT_ROOT / "robotic-hand"
+ROBOTIC_HAND = PROJECT_ROOT
 
 
 @pytest.mark.skipif(os.environ.get("SKIP_PHASE2_DOCKER_TESTS") == "1", reason="Phase 2 docker tests skipped")
-def test_tc2_4_duplicate_processed_once():
+def test_tc2_3_kill_edge_restart_pending():
     compose_file = ROBOTIC_HAND / "docker-compose.yml"
     try:
         subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "-d"], cwd=str(ROBOTIC_HAND), check=False, timeout=60)
@@ -40,27 +39,37 @@ def test_tc2_4_duplicate_processed_once():
     worker = Worker(settings=settings, inference_endpoint="http://127.0.0.1:8000/predict")
     worker.start()
     time.sleep(2)
+
     publisher = Publisher(settings=settings, outbox=outbox)
     publisher.start()
-    time.sleep(2)
-
-    grabber = FrameGrabber(ROBOTIC_HAND / "images", camera_enabled=False)
-    frame = grabber.next_frame()
-    msg = outbox.enqueue(frame.jpeg_bytes)
-    # publish twice
-    publisher._publish_message(msg)
     time.sleep(1)
-    publisher._publish_message(msg)
-    time.sleep(5)
-
-    # check processed once
-    conn = sqlite3.connect(str(settings.processed_db))
-    cur = conn.execute("SELECT COUNT(*) FROM processed_ids WHERE message_id=?", (msg.message_id,))
-    count = cur.fetchone()[0]
-    conn.close()
-    assert count == 1
-
+    grabber = FrameGrabber(ROBOTIC_HAND / "images", camera_enabled=False)
+    for i in range(20):
+        frame = grabber.next_frame()
+        publisher.send_frame(frame.jpeg_bytes)
+    time.sleep(1)
+    # kill edge process (stop publisher)
     publisher.stop()
+    time.sleep(2)
+    # send more while "dead" - but we need to simulate; enqueue directly
+    for i in range(30):
+        frame = grabber.next_frame()
+        outbox.enqueue(frame.jpeg_bytes)
+    # restart publisher
+    publisher2 = Publisher(settings=settings, outbox=outbox)
+    publisher2.start()
+    time.sleep(10)
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        counts = outbox.count_by_state()
+        if counts.get('acked', 0) >= 50:
+            break
+        time.sleep(1)
+    counts = outbox.count_by_state()
+    assert counts.get('acked', 0) >= 50
+
+    publisher2.stop()
     worker.stop()
     try:
         subprocess.run(["docker", "compose", "-f", str(compose_file), "down"], cwd=str(ROBOTIC_HAND), check=False, timeout=60)

@@ -17,7 +17,7 @@ from phase1_pipeline.capture import FrameGrabber
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ROBOTIC_HAND = PROJECT_ROOT / "robotic-hand"
+ROBOTIC_HAND = PROJECT_ROOT
 
 
 @pytest.mark.skipif(os.environ.get("SKIP_PHASE2_DOCKER_TESTS") == "1", reason="Phase 2 docker tests skipped")

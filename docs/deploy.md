@@ -41,7 +41,7 @@ the Internet.
 - A Google Cloud project with billing enabled, **or** an Azure subscription.
 - `gcloud` CLI (`gcloud init`) **or** `az` CLI (`az login`).
 - Docker on the edge machine (for Mosquitto): `docker compose up -d` in
-  `robotic-hand/`.
+  the repository root.
 - Python 3.10+ on the edge with `pip install -r requirements.txt`.
 - A token generated on the edge:
 
@@ -361,7 +361,6 @@ has ended.
 With the provider IPs known:
 
 ```bash
-cd robotic-hand
 docker compose up -d                 # local Mosquitto only
 
 export API_TOKEN='the-same-token-you-put-on-the-VMs'

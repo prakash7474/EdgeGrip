@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Real inference server image (CPU). Build from the robotic-hand/ directory:
+# Real inference server image (CPU). Build from the repository root:
 #   docker build -f real_server/Dockerfile -t robotic-hand-real-server:5a .
 #
 # API_TOKEN is a runtime secret and is never baked into the image.

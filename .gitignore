@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Repository-wide ignores. Sub-project .gitignore files add their own rules.
+# Repository ignores: secrets, caches, runtime data, logs and broker state.
 # ---------------------------------------------------------------------------
 
 # Secrets — never commit real credentials
@@ -37,6 +37,10 @@ htmlcov/
 *.log
 logs/*.csv
 !logs/.gitkeep
+
+# Mosquitto broker runtime state (configuration is committed)
+mosquitto/data/
+mosquitto/log/
 
 # Local tooling / environment
 .freebuff/

@@ -1,7 +1,8 @@
-"""TC2.5 — unacked past timeout: retried with growing delays, then acked."""
+"""TC2.4 — same message_id sent twice: processed exactly once."""
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -16,11 +17,11 @@ from phase1_pipeline.capture import FrameGrabber
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ROBOTIC_HAND = PROJECT_ROOT / "robotic-hand"
+ROBOTIC_HAND = PROJECT_ROOT
 
 
 @pytest.mark.skipif(os.environ.get("SKIP_PHASE2_DOCKER_TESTS") == "1", reason="Phase 2 docker tests skipped")
-def test_tc2_5_retry_with_backoff_then_ack():
+def test_tc2_4_duplicate_processed_once():
     compose_file = ROBOTIC_HAND / "docker-compose.yml"
     try:
         subprocess.run(["docker", "compose", "-f", str(compose_file), "up", "-d"], cwd=str(ROBOTIC_HAND), check=False, timeout=60)
@@ -41,34 +42,26 @@ def test_tc2_5_retry_with_backoff_then_ack():
     time.sleep(2)
     publisher = Publisher(settings=settings, outbox=outbox)
     publisher.start()
-    time.sleep(1)
-
-    # stop worker so messages go unacked
-    worker.stop()
-    time.sleep(1)
+    time.sleep(2)
 
     grabber = FrameGrabber(ROBOTIC_HAND / "images", camera_enabled=False)
-    for i in range(5):
-        frame = grabber.next_frame()
-        publisher.send_frame(frame.jpeg_bytes)
-    time.sleep(5)  # wait for retries (backoff 1s,2s,4s...)
+    frame = grabber.next_frame()
+    msg = outbox.enqueue(frame.jpeg_bytes)
+    # publish twice
+    publisher._publish_message(msg)
+    time.sleep(1)
+    publisher._publish_message(msg)
+    time.sleep(5)
 
-    # restart worker
-    worker2 = Worker(settings=settings, inference_endpoint="http://127.0.0.1:8000/predict")
-    worker2.start()
-    time.sleep(10)
-
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        counts = outbox.count_by_state()
-        if counts.get('acked', 0) >= 5:
-            break
-        time.sleep(1)
-    counts = outbox.count_by_state()
-    assert counts.get('acked', 0) >= 5
+    # check processed once
+    conn = sqlite3.connect(str(settings.processed_db))
+    cur = conn.execute("SELECT COUNT(*) FROM processed_ids WHERE message_id=?", (msg.message_id,))
+    count = cur.fetchone()[0]
+    conn.close()
+    assert count == 1
 
     publisher.stop()
-    worker2.stop()
+    worker.stop()
     try:
         subprocess.run(["docker", "compose", "-f", str(compose_file), "down"], cwd=str(ROBOTIC_HAND), check=False, timeout=60)
     except Exception:

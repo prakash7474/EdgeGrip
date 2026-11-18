@@ -905,7 +905,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as exc:
         print(f"error: MQTT broker {broker_host}:{broker_port} is not reachable ({exc.__class__.__name__}).",
               file=sys.stderr)
-        print("       Start it first, e.g. `docker compose up -d` in robotic-hand/.", file=sys.stderr)
+        print("       Start it first, e.g. `docker compose up -d` at the repository root.", file=sys.stderr)
         return 2
 
     if not os.getenv("API_TOKEN", "").strip():

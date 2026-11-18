@@ -73,7 +73,7 @@ Phase 1 can still be run on its own: capture → HTTP POST → measured round tr
 ## Project structure
 
 ```
-robotic-hand/
+.
 ├── README.md
 ├── .env.example / .gitignore
 ├── requirements.txt / requirements-real.txt
@@ -136,8 +136,6 @@ robotic-hand/
 Python 3.10 or newer is required; verified on 3.14.5.
 
 ```bash
-cd robotic-hand
-
 python -m venv .venv
 source .venv/Scripts/activate     # Windows (Git Bash)
 # macOS / Linux: source .venv/bin/activate
@@ -181,7 +179,6 @@ Two terminals for the baseline path:
 
 ```bash
 # terminal 1
-cd robotic-hand
 python -m mock_server --port 8000
 
 # terminal 2
@@ -221,7 +218,7 @@ label declared in `images/labels.json` keyed by the image SHA-256, so tests are
 deterministic and offline; it is not an accuracy benchmark.
 
 Measured baseline from a real 20-request run against the local mock server
-(full record in [`docs/measurements.md`](docs/measurements.md)):
+(full record in [`docs/measurements.md`](measurements.md)):
 
 | Metric | Value |
 |---|---|
@@ -389,7 +386,7 @@ commands.
   (FNV-1a 32-bit), `ACK`/`NACK` replies with a reason, angle 0–180° and speed
   1–100 % limits, a 32-command-id dedup window, boot-safe state, and a servo
   safe state after a heartbeat timeout. Full spec:
-  [`docs/device_protocol.md`](docs/device_protocol.md).
+  [`docs/device_protocol.md`](device_protocol.md).
 - **`FakeDevice`** implements the same protocol in Python, so TC5b.6–TC5b.8
   (checksum/format/NACK reasons, dedup window, limits, safe state) run in
   pytest without hardware. `SerialActuator` is tested against it through the
@@ -421,10 +418,10 @@ command; it is reported, never retried automatically.
 
 ### Firmware and hardware status
 
-> **The firmware sketch in [`firmware/`](firmware/) is untested on hardware.**
+> **The firmware sketch in [`firmware/`](../firmware/) is untested on hardware.**
 > It has never been compiled, flashed or run. The servo rail needs a separate
 > supply and a physical e-stop that cuts servo power. Wiring and the first-run
-> checklist are in [`docs/hardware.md`](docs/hardware.md). No physical robot
+> checklist are in [`docs/hardware.md`](hardware.md). No physical robot
 > was driven in this workspace, and TC5b.4/TC5b.5 skip without a port and an
 > explicit opt-in.
 
@@ -467,7 +464,7 @@ PyBullet test.
 ## Measured numbers
 
 Real, measured results only — no fabricated values. All sections are in
-[`docs/measurements.md`](docs/measurements.md), including:
+[`docs/measurements.md`](measurements.md), including:
 
 - Phase 1 loopback latency (above).
 - Phase 2 reliability runs, where Docker was available.

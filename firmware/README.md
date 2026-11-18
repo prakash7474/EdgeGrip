@@ -68,7 +68,6 @@ arduino-cli upload  --fqbn esp32:esp32:esp32 -p COM5 firmware/robotic_hand
 From the host with `ACTUATION_SERIAL_PORT` set:
 
 ```bash
-cd robotic-hand
 export ACTUATION_SERIAL_PORT=COM5          # or /dev/ttyUSB0
 python - <<'PY'
 from actuator import SerialActuator

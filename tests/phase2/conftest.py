@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ROBOTIC_HAND = PROJECT_ROOT / "robotic-hand"
+ROBOTIC_HAND = PROJECT_ROOT
 
 
 def _free_port():

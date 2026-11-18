@@ -8,7 +8,7 @@
 
 AI-assisted robotic hand for small-scale industrial automation. Perception and decision-making run on whichever compute is available — an on-site GPU if the factory has one, a rented cloud GPU if it doesn't — connected through a reliable messaging layer so no sensor reading or command is lost if the network drops.
 
-The reference implementation lives in [`robotic-hand/`](robotic-hand/README.md). Phases 1–5b are implemented and tested offline: baseline pipeline, reliable MQTT delivery, multi-provider routing, conflict-safe decision handling, and an actuator layer with a serial device protocol. The Phase 5b firmware sketch is **untested on real hardware**; no physical robot has been driven.
+The implementation lives at the repository root ([`docs/PHASES.md`](docs/PHASES.md)). Phases 1–5b are implemented and tested offline: baseline pipeline, reliable MQTT delivery, multi-provider routing, conflict-safe decision handling, and an actuator layer with a serial device protocol. The Phase 5b firmware sketch is **untested on real hardware**; no physical robot has been driven.
 
 ## Table of contents
 
@@ -35,14 +35,12 @@ This repository contains a working reference implementation plus the original si
 
 | Phase | What it adds | Where |
 |---|---|---|
-| **1 — baseline** | Capture → HTTP inference → measured latency; deterministic offline mock server; optional real RT-DETR endpoint | [`robotic-hand/`](robotic-hand/README.md) |
-| **2 — reliable delivery** | SQLite outbox written before send, Mosquitto/MQTT QoS 1, ACKs, exponential backoff, restart recovery, worker dedup | [`robotic-hand/phase2_reliability/`](robotic-hand/phase2_reliability/) |
-| **3 — multi-provider routing** | Health checks, circuit breaker, EWMA preference, sequential failover, shared sessions, deadline-derived timeouts | [`robotic-hand/phase3_router/`](robotic-hand/phase3_router/) |
-| **4 — conflict handling** | Task context end to end, first-writer-wins result claims, discard log, robot decision gate, safe defaults, exactly-once application | [`robotic-hand/phase4_conflict/`](robotic-hand/phase4_conflict/) |
-| **5a — deployment harness** | Token-authenticated container image, live latency/fault drills, cloud deployment notes | [`robotic-hand/live_run.py`](robotic-hand/live_run.py), [`robotic-hand/docs/deploy.md`](robotic-hand/docs/deploy.md) |
-| **5b — actuation** | Actuator interface (stub/serial/sim), config-driven policy, gate → one action per task, checksummed serial protocol, fake device, firmware sketch and hardware safety notes | [`robotic-hand/actuator/`](robotic-hand/actuator/), [`robotic-hand/firmware/`](robotic-hand/firmware/), [`robotic-hand/docs/device_protocol.md`](robotic-hand/docs/device_protocol.md) |
-
-The earlier single-provider prototype is kept in [`robot-cloud-ai/`](robot-cloud-ai/README.md) for comparison; it is not the current pipeline.
+| **1 — baseline** | Capture → HTTP inference → measured latency; deterministic offline mock server; optional real RT-DETR endpoint | [``](README.md) |
+| **2 — reliable delivery** | SQLite outbox written before send, Mosquitto/MQTT QoS 1, ACKs, exponential backoff, restart recovery, worker dedup | [`phase2_reliability/`](phase2_reliability/) |
+| **3 — multi-provider routing** | Health checks, circuit breaker, EWMA preference, sequential failover, shared sessions, deadline-derived timeouts | [`phase3_router/`](phase3_router/) |
+| **4 — conflict handling** | Task context end to end, first-writer-wins result claims, discard log, robot decision gate, safe defaults, exactly-once application | [`phase4_conflict/`](phase4_conflict/) |
+| **5a — deployment harness** | Token-authenticated container image, live latency/fault drills, cloud deployment notes | [`live_run.py`](live_run.py), [`docs/deploy.md`](docs/deploy.md) |
+| **5b — actuation** | Actuator interface (stub/serial/sim), config-driven policy, gate → one action per task, checksummed serial protocol, fake device, firmware sketch and hardware safety notes | [`actuator/`](actuator/), [`firmware/`](firmware/), [`docs/device_protocol.md`](docs/device_protocol.md) |
 
 ## Features
 
@@ -113,12 +111,12 @@ pip install -r requirements-real.txt
 python -m real_server --port 8001
 ```
 
-See [`robotic-hand/README.md`](robotic-hand/README.md) for each phase's commands, configuration and measurements.
+See [`docs/PHASES.md`](docs/PHASES.md) for each phase's commands, configuration and measurements.
 
 ## Project structure
 
 ```
-robotic-hand/
+.
 ├── README.md                  # phase-by-phase documentation and commands
 ├── .env.example / .gitignore
 ├── requirements.txt / requirements-real.txt
