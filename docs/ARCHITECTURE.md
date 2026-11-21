@@ -129,6 +129,11 @@ for operator review; it is not retried automatically.
 | `phase4_conflict/` | task context, result claims, discard log, decision gate |
 | `actuator/` | actuator interface, policy, actuation log, serial protocol, fake device |
 | `mock_server/` | deterministic HTTP inference mock used by tests |
-| `real_server/` | optional RT-DETR endpoint with token auth |
+| `real_server/` | optional detection/classification endpoint with token auth |
+| `tools/` | Phase 6 webcam capture and session-based dataset splitting |
+| `training/` | Phase 6 fine-tuning, locked-test evaluation and model card |
+| `config/` | Phase 6 training config and classification policy example |
+| `ui/` | Phase 7 FastAPI dashboard, demo/live sources and static page |
+| `phase3_router/telemetry.py` | opt-in, non-blocking JSONL provider telemetry for the dashboard |
 | `firmware/` | untested ESP32/Arduino sketch |
 | `benchmarks/` | loopback router overhead benchmark |

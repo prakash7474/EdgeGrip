@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "default": {
+    "action": "hold"
+  },
+  "rules": [
+    {
+      "label": "bolt",
+      "min_score": 0.6,
+      "action": "grip",
+      "parameters": {
+        "speed": 25
+      }
+    },
+    {
+      "label": "nut",
+      "min_score": 0.6,
+      "action": "grip",
+      "parameters": {
+        "speed": 25
+      }
+    },
+    {
+      "label": "washer",
+      "min_score": 0.6,
+      "action": "release",
+      "parameters": {
+        "speed": 25
+      }
+    }
+  ]
+}

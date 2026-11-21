@@ -1,7 +1,16 @@
-"""Real inference server using HuggingFace transformers object-detection.
+"""Real inference server for object detection or image classification.
 
-Loads model once at startup, does warm-up inference before serving. Device
-auto-detected (CUDA if available else CPU). Configurable via environment variables.
+``TASK`` selects the Hugging Face pipeline:
+
+* ``detection`` (default) — object detection, unchanged from Phase 1.
+* ``classification`` — one image classifier; below the configured threshold
+  the prediction becomes ``"unknown"``.
+
+Loads the model once at startup and warms it up before serving. Device is
+auto-detected (CUDA if available, else CPU). Configurable via environment
+variables. The classification path does not import torch at module
+import time, so tests can inject a tiny fake pipeline without downloading
+weights.
 """
 
 from __future__ import annotations
@@ -25,6 +34,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_IMAGES_DIR = PROJECT_ROOT / "images"
 
 DEFAULT_MODEL_ID = "PekingU/rtdetr_r18vd"
+DEFAULT_DETECTION_MODEL_ID = DEFAULT_MODEL_ID
+DEFAULT_CLASSIFICATION_MODEL_ID = "microsoft/resnet-18"
+DEFAULT_TASK = "detection"
+VALID_TASKS = ("detection", "classification")
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
@@ -37,6 +50,25 @@ def _get_device() -> str:
         return "cpu"
     except Exception:
         return "cpu"
+
+
+def configured_task() -> str:
+    """Return ``TASK``, defaulting to detection and rejecting unknown values."""
+    task = os.getenv("TASK", DEFAULT_TASK).strip().lower() or DEFAULT_TASK
+    if task not in VALID_TASKS:
+        raise ValueError(
+            f"TASK must be one of {', '.join(VALID_TASKS)}; got {task!r}"
+        )
+    return task
+
+
+def _decode_image(image_bytes: bytes) -> Image.Image:
+    """Decode raw JPEG/PNG bytes into an RGB PIL image."""
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Could not decode image")
+    return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
 
 class RealModel:
@@ -70,14 +102,8 @@ class RealModel:
             LOG.warning(f"Warmup failed: {e}")
 
     def predict(self, image_bytes: bytes) -> tuple[dict[str, Any], float]:
-        # decode image
-        arr = np.frombuffer(image_bytes, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if img is None:
-            raise ValueError("Could not decode image")
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(img_rgb)
-        
+        pil = _decode_image(image_bytes)
+
         start = time.perf_counter()
         results = self.pipe(pil)
         server_inference_ms = round((time.perf_counter() - start) * 1000.0, 3)
@@ -115,6 +141,121 @@ class RealModel:
         return response, server_inference_ms
 
 
+def _top_classification(results: Any) -> tuple[str, float]:
+    """Return the top ``(label, score)`` from a transformers pipeline result."""
+    if isinstance(results, dict):
+        results = [results]
+    if isinstance(results, list) and results and isinstance(results[0], list):
+        results = results[0]
+    if not isinstance(results, list) or not results:
+        return "unknown", 0.0
+
+    best = max(results, key=lambda item: float(item.get("score", 0.0)))
+    label = str(best.get("label", "")).strip()
+    score = float(best.get("score", 0.0))
+    if not label:
+        return "unknown", score
+    return label, score
+
+
+def build_classification_response(
+    results: Any,
+    *,
+    threshold: float,
+    model_id: str,
+    device: str,
+    server_inference_ms: float,
+) -> dict[str, Any]:
+    """Build the classification contract, turning a low top score into unknown."""
+    label, score = _top_classification(results)
+    prediction = label if score >= threshold else "unknown"
+    return {
+        "prediction": prediction,
+        "label": prediction,
+        "score": score,
+        "confidence": score,
+        "above_threshold": score >= threshold,
+        "threshold": threshold,
+        "task": "classification",
+        "server_inference_ms": server_inference_ms,
+        "model": model_id,
+        "device": device,
+    }
+
+
+class ClassificationModel:
+    """One pretrained image classifier behind the same ``predict`` interface."""
+
+    def __init__(self, pipe=None, *, model_id: str | None = None,
+                 device: str | None = None, threshold: float | None = None):
+        self.task = "classification"
+        self.model_id = (
+            model_id or os.getenv("MODEL_ID", "").strip()
+            or DEFAULT_CLASSIFICATION_MODEL_ID
+        )
+        self.device = device or _get_device()
+        if threshold is None:
+            threshold = float(os.getenv("CLASSIFICATION_THRESHOLD", "0.5"))
+        self.threshold = float(threshold)
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("CLASSIFICATION_THRESHOLD must be between 0 and 1")
+        self.pipe = pipe
+        if self.pipe is None:
+            self._load()
+
+    def _load(self):
+        try:
+            from transformers import pipeline
+
+            LOG.info("Loading classification model %s on %s...", self.model_id, self.device)
+            self.pipe = pipeline(
+                "image-classification",
+                model=self.model_id,
+                device=0 if self.device == "cuda" else -1,
+            )
+            LOG.info("Model loaded")
+        except Exception as exc:
+            LOG.error("Failed to load model: %s", exc)
+            raise
+
+    def warmup(self):
+        try:
+            self.pipe(_decode_image(_dummy_jpeg()))
+            LOG.info("Warmup complete")
+        except Exception as exc:
+            LOG.warning("Warmup failed: %s", exc)
+
+    def predict(self, image_bytes: bytes) -> tuple[dict[str, Any], float]:
+        pil = _decode_image(image_bytes)
+        start = time.perf_counter()
+        results = self.pipe(pil)
+        server_inference_ms = round((time.perf_counter() - start) * 1000.0, 3)
+        response = build_classification_response(
+            results,
+            threshold=self.threshold,
+            model_id=self.model_id,
+            device=self.device,
+            server_inference_ms=server_inference_ms,
+        )
+        return response, server_inference_ms
+
+
+def _dummy_jpeg() -> bytes:
+    """Return a tiny blank JPEG for classification warm-up."""
+    dummy = np.zeros((224, 224, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", dummy)
+    if not ok:  # pragma: no cover - OpenCV always encodes this array
+        raise RuntimeError("Could not build warmup image")
+    return encoded.tobytes()
+
+
+def build_model():
+    """Build the model selected by ``TASK`` (detection is the default)."""
+    if configured_task() == "classification":
+        return ClassificationModel()
+    return RealModel()
+
+
 def _api_token() -> str:
     """Return the configured token, or an empty string when authentication is off."""
     return os.getenv("API_TOKEN", "").strip()
@@ -132,16 +273,17 @@ def _token_matches(provided: str) -> bool:
     return hmac.compare_digest(provided, expected)
 
 
-def create_app(model: RealModel | None = None) -> FastAPI:
+def create_app(model: Any | None = None) -> FastAPI:
     """Build the real inference application.
 
     Args:
-        model: Optional pre-built model. Tests inject a stub so they can check
-            auth and routing without downloading torch weights.
+        model: Optional pre-built model. Tests inject a stub classifier so they
+            can check auth, thresholds and task-id echo without downloading
+            torch weights.
     """
-    app = FastAPI(title="Robotic Hand real inference server", version="1.0.0")
+    app = FastAPI(title="Robotic Hand real inference server", version="1.1.0")
     if model is None:
-        model = RealModel()
+        model = build_model()
         # Warm up before serving so the first real request is not the slowest.
         model.warmup()
     app.state.model = model

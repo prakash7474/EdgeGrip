@@ -33,9 +33,14 @@ htmlcov/
 *.sqlite
 *.sqlite3
 
+# Phase 6: captured photos and trained checkpoints are local artifacts
+data/
+training/runs/
+
 # Generated logs and reports (committed docs/measurements.md is kept)
 *.log
 logs/*.csv
+logs/ui/
 !logs/.gitkeep
 
 # Mosquitto broker runtime state (configuration is committed)

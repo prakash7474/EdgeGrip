@@ -10,7 +10,10 @@ from real_server.app import create_app
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Real inference server (RT-DETR)")
+    parser = argparse.ArgumentParser(
+        description="Real inference server (TASK=detection or classification; "
+                    "detection is the default)"
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8001, help="Bind port (default 8001)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")

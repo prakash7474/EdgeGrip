@@ -12,11 +12,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/models/hf \
     PORT=8001
 
-# MODEL_ID and DETECTION_THRESHOLD are runtime-overridable; MODEL_ID is also
-# used at build time when PRELOAD_MODEL=1 so the container can start offline.
+# MODEL_ID, DETECTION_THRESHOLD, TASK and CLASSIFICATION_THRESHOLD are runtime-
+# overridable; TASK/MODEL_ID are also used at build time when PRELOAD_MODEL=1 so
+# the container can start offline. TASK defaults to detection.
+ARG TASK=detection
 ARG MODEL_ID=PekingU/rtdetr_r18vd
 ARG PRELOAD_MODEL=1
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+ENV TASK=${TASK}
 ENV MODEL_ID=${MODEL_ID}
 
 WORKDIR /app
@@ -43,7 +46,7 @@ USER app
 # Download the model during the build (default). Set PRELOAD_MODEL=0 to defer
 # the download to the first container start; /models is writable by `app`.
 RUN if [ "${PRELOAD_MODEL}" = "1" ]; then \
-        python -c "import os; from transformers import pipeline; pipeline('object-detection', model=os.environ['MODEL_ID'])"; \
+        python -c "import os; from transformers import pipeline; task = 'image-classification' if os.environ.get('TASK', 'detection') == 'classification' else 'object-detection'; pipeline(task, model=os.environ['MODEL_ID'])"; \
     fi
 
 EXPOSE 8001

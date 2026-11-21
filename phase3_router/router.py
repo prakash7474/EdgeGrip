@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -104,8 +105,28 @@ class Router:
         self._timeout_ok: Dict[str, bool] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        # Opt-in dashboard telemetry. Unset by default, so Phase 3 behavior is
+        # unchanged; the writer drops events rather than blocking inference.
+        self._telemetry = None
+        telemetry_path = os.getenv("ROUTER_TELEMETRY_PATH", "").strip()
+        if telemetry_path:
+            try:
+                from phase3_router.telemetry import TelemetryWriter
+
+                self._telemetry = TelemetryWriter(telemetry_path)
+            except Exception:
+                LOG.warning("Dashboard telemetry could not be enabled")
         if self.health_check:
             self._start_health_thread()
+
+    def _emit(self, kind: str, **fields: Any) -> None:
+        """Best-effort telemetry emit; never affects routing."""
+        if self._telemetry is None:
+            return
+        try:
+            self._telemetry.emit(kind, **fields)
+        except Exception:
+            pass
 
     def _start_health_thread(self):
         t = threading.Thread(target=self._health_loop, daemon=True)
@@ -122,6 +143,11 @@ class Router:
                 with self._lock:
                     self._healthy_cache[p.name] = ok
                     self._last_check[p.name] = time.time()
+                cb = self._cb.get(p.name)
+                self._emit(
+                    "provider_health", provider=p.name, healthy=ok,
+                    circuit=cb.state if cb else "unknown",
+                )
             time.sleep(self.recheck_interval_sec)
 
     def is_healthy(self, provider: Provider) -> bool:
@@ -245,6 +271,20 @@ class Router:
                     with self._lock:
                         old = self._ewma.get(provider.name, latency_ms)
                         self._ewma[provider.name] = self.ewma_alpha * latency_ms + (1 - self.ewma_alpha) * old
+                        ewma_ms = self._ewma[provider.name]
+                    self._emit(
+                        "provider_result", provider=provider.name, ok=True,
+                        label=res.label, score=getattr(res, "score", None),
+                        latency_ms=latency_ms, ewma_ms=ewma_ms,
+                        circuit=cb.state if cb else "unknown", attempts=attempts,
+                        task_id=str(req_task_id) if req_task_id is not None else None,
+                    )
+                    if failover_start is not None:
+                        self._emit(
+                            "failover", provider=provider.name, attempts=attempts,
+                            failover_ms=failover_time_ms,
+                            task_id=str(req_task_id) if req_task_id is not None else None,
+                        )
                     return RouterResult(
                         ok=True,
                         label=res.label,
@@ -262,11 +302,21 @@ class Router:
                     errors.append(f"{provider.name}:{res.error or 'failed'}")
                     if cb:
                         cb.record_failure()
+                    self._emit(
+                        "provider_result", provider=provider.name, ok=False,
+                        error=str(res.error or "failed"),
+                        circuit=cb.state if cb else "unknown", attempts=attempts,
+                    )
                     continue
             except Exception as e:
                 errors.append(f"{provider.name}:{e}")
                 if cb:
                     cb.record_failure()
+                self._emit(
+                    "provider_result", provider=provider.name, ok=False,
+                    error=e.__class__.__name__,
+                    circuit=cb.state if cb else "unknown", attempts=attempts,
+                )
                 continue
         latency_ms = round((time.perf_counter() - total_start) * 1000.0, 3)
         return RouterResult(ok=False, label=None, provider="none", latency_ms=latency_ms,

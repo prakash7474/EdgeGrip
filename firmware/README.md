@@ -110,3 +110,15 @@ heartbeat/stop and duplicate-stop; they never move the hand.
   mechanism that is already moving under gravity.
 - `HEARTBEAT_TIMEOUT_MS`, angles and speeds must match
   `actuator/protocol.py`; the two are kept in sync by hand.
+
+## Project dashboard (demo data)
+
+This screenshot is the project-level EdgeGrip dashboard, **not** validation of
+the firmware. It was captured from `python -m ui --demo`; every value is
+synthetic, and no hardware was connected. The firmware above remains
+uncompiled and untested.
+
+![EdgeGrip dashboard in demo mode](../docs/screenshots/dashboard-demo.png)
+
+See the root [README](../README.md) and [UI guide](../docs/UI.md) for the
+dashboard setup and limitations.

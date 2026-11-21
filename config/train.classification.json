@@ -1,0 +1,20 @@
+{
+  "manifest": "data/manifest.csv",
+  "data_dir": "data",
+  "output_dir": "training/runs/classifier",
+  "model_id": "microsoft/resnet-18",
+  "epochs": 8,
+  "batch_size": 32,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.01,
+  "early_stopping_patience": 3,
+  "metric": "val_loss",
+  "seed": 42,
+  "num_workers": 0,
+  "random_hflip": true,
+  "use_cpu": false,
+  "max_train_samples": 0,
+  "max_val_samples": 0,
+  "max_train_batches": 0,
+  "max_val_batches": 0
+}

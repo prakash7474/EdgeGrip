@@ -13,8 +13,12 @@ GPU when it does not — connected by a durable MQTT path so a network drop does
 not lose work in the failure modes that were tested. The repository is a
 reference implementation of that split: camera capture, a SQLite outbox,
 Mosquitto delivery, multi-provider routing, conflict-safe claims, a robot-side
-decision gate, and a serial actuator protocol. The firmware and the physical
-hand remain untested.
+decision gate, and a serial actuator protocol. Phase 6 adds the optional
+tooling for one custom image-classification task: webcam dataset capture,
+session-based splits, fine-tuning of a small pretrained classifier, a locked
+test evaluation, and a `TASK=classification` mode on `real_server`. A local
+FastAPI dashboard reads the run artifacts and controls a live run without a
+build step or CDN. The firmware and the physical hand remain untested.
 
 ## Architecture
 
@@ -43,15 +47,17 @@ More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | **4 — conflict handling** | Yes | Yes — claim races, restarts and 1000-task worker path | Broker not required for these tests. No real-cloud run. |
 | **5a — deployment harness** | Yes | Yes — token enforcement and client/provider token handling | **No real cloud deployment.** No VM was provisioned and no hosted endpoint was called. |
 | **5b — actuation** | Yes | Yes — stub actuator, fake device, serial path over a fake transport | **No real hardware.** The firmware sketch has never been compiled, flashed or run; hardware-gated tests skipped. |
+| **6 — custom classifier** | Yes | Yes — session split integrity, classification HTTP contract, low-score → `unknown` → `hold` with a fake classifier | **No real dataset, webcam capture or training run.** No photos were collected, no GPU/Colab/Kaggle job ran, and `docs/model_card.md` contains no accuracy number. |
+| **7 — local dashboard** | Yes | Yes — demo APIs, token gate, bind rules, run validation, mock-fault refusal, stop label | **No live camera or real run.** The demo UI was launched and a real headless-Chrome screenshot was captured; Playwright is not installed, so its optional test skipped. |
 
 ## Test status
 
 Collected from the repository with `python -m pytest --collect-only -q`
-(88 tests). Statuses below are from the offline run in this workspace on
+(109 tests). Statuses below are from the offline run in this workspace on
 Windows 11 with Python 3.14.5:
 
 ```text
-74 passed, 14 skipped
+93 passed, 16 skipped
 ```
 
 <!-- TEST_TABLE_START -->
@@ -101,11 +107,109 @@ Windows 11 with Python 3.14.5:
 | TC5b.8 | tests/phase5b/test_tc5b_actuator.py | Passed (3 tests) |
 | TC5b-sim | tests/phase5b/test_tc5b_actuator.py | Skipped — optional pybullet package not installed |
 | TC5b-live | tests/phase5b/test_tc5b_live_latency.py | Passed (3 tests) |
+| TC6.1 | tests/test_phase6_classification.py | Passed (2 tests) — session split, manifest, duplicate and minimum-count failures |
+| TC6.2 | tests/test_phase6_classification.py | Skipped — needs a webcam and physical parts; capture is a manual step |
+| TC6.3 | tests/test_phase6_classification.py | Passed (2 tests) — classification contract over HTTP with a tiny fake classifier, offline |
+| TC6.4 | tests/test_phase6_classification.py | Passed (2 tests) — low top score becomes `unknown`; policy holds |
+| UI | tests/test_ui_dashboard.py, tests/test_ui_live_source.py | Passed (13 tests); optional Playwright screenshot skipped — package not installed |
 | REAL-MODEL | tests/test_real_model.py | Skipped — RUN_REAL_MODEL not set; no model download or real inference run |
 <!-- TEST_TABLE_END -->
 
 `python -m scripts.check_docs` verifies that every test ID in this table maps
 to a collected test and every collected test has a row.
+
+## Phase 6 — one custom classification task
+
+Phase 6 is optional tooling around the same edge/cloud contract. It does not
+change Phase 1–5 behavior, and `TASK` defaults to `detection`.
+
+1. **Capture** one class at a time from a webcam. Each photo is stored as
+   `data/<class>/<session>_<n>.jpg`; the preview shows the live count for every
+   class. `data/` is gitignored, so photos are never committed.
+
+   ```bash
+   python tools/capture_dataset.py bolt session01
+   python tools/capture_dataset.py nut session02 --max-images 40
+   ```
+
+2. **Split by session**, never by random file. The manifest is validated before
+   it is written; duplicate paths, a session in two splits, a class below the
+   minimum, or fewer than three sessions per class all fail the command.
+
+   ```bash
+   python tools/split_dataset.py --data-dir data --manifest data/manifest.csv
+   ```
+
+3. **Fine-tune** a small pretrained classifier (`microsoft/resnet-18` in the
+   example config). `metrics.csv` gets one row per epoch, early stopping watches
+   validation, and only the best checkpoint is kept. The test split is not read
+   by training. A CPU smoke test runs one epoch on a tiny subset.
+
+   ```bash
+   pip install -r requirements-training.txt
+   python -m training.train --config config/train.classification.json --smoke
+   python -m training.train --config config/train.classification.json
+   ```
+
+4. **Evaluate once** on the locked test split. This writes the accuracy,
+   per-class precision/recall, confusion-matrix PNG and misclassified files into
+   [docs/model_card.md](docs/model_card.md).
+
+   ```bash
+   python -m training.evaluate \
+     --checkpoint training/runs/classifier/best \
+     --manifest data/manifest.csv --data-dir data
+   ```
+
+5. **Serve classification** with the same contract used by the pipeline:
+   `prediction`, `score`, `server_inference_ms` and the `X-Task-Id` echo. A top
+   score below `CLASSIFICATION_THRESHOLD` (default `0.5`) returns
+   `prediction: "unknown"`. Detection is unchanged and still the default.
+
+   ```bash
+   TASK=classification MODEL_ID=microsoft/resnet-18 \
+     API_TOKEN=replace-with-a-real-token python -m real_server --port 8001
+   ```
+
+   `config/policy.classification.example.json` maps the example labels (`bolt`,
+   `nut`, `washer`) and defaults to `hold`, so `unknown` or a low score sends
+   nothing. Load it with `ACTUATION_POLICY_PATH`.
+
+No dataset, training run or evaluation was produced in this repository. The
+model card therefore reports no accuracy. Any number you see there in the
+future came from a specific local dataset, not from this README.
+
+## Phase 7 — local dashboard
+
+![Dashboard in demo mode](docs/screenshots/dashboard-demo.png)
+
+This is a real headless-Chrome screenshot of `python -m ui --demo --port 8099`.
+Every value in it is synthetic; the banner is part of the page, not an image
+annotation.
+
+```bash
+# Demo data: no camera, broker, Docker or cloud endpoint
+python -m ui --demo --port 8080
+
+# Read the latest logs/live run artifacts read-only
+python -m ui --port 8080
+
+# Non-loopback bind needs both the explicit flag and API_TOKEN
+API_TOKEN="$(python -c "import secrets; print(secrets.token_urlsafe(32))")" \
+  python -m ui --host 0.0.0.0 --allow-remote --port 8080
+```
+
+The page is a single HTML/CSS/JS document served by FastAPI. Charts are drawn
+with canvas and there are no CDN scripts, so it works offline. Panels show the
+latest frame with prediction/score overlay, provider health/EWMA/circuit/last
+failover, latency with p50/p95/p99, counts, events and actuation rows. Run
+controls accept only typed parameters (`source`, `fps`, `deadline_ms`,
+`duration`, `endpoints`, `camera`) and launch `live_run.py` as a separate
+process with no shell. Mock fault buttons require a confirmation field and only
+accept loopback providers configured at startup. The software stop is labelled
+**not an emergency stop** in both the button and the API response.
+
+Read [docs/UI.md](docs/UI.md) for the API, data sources and security notes.
 
 ## Measured results
 
@@ -173,6 +277,21 @@ write, or a device that never returns an ACK.
   a physical e-stop that cuts servo power.
 - **Optional simulation not exercised.** The PyBullet `SimActuator` test skips
   because `pybullet` is not installed in this environment.
+- **No custom classifier result exists.** Phase 6 tooling is implemented and its
+  offline tests pass, but no dataset was captured, no training job ran on a GPU
+  or CPU, and no test-set evaluation was produced. `docs/model_card.md` says so.
+- **The classification threshold is not a safety guarantee.** A confident wrong
+  label can still pass the threshold. The policy's `hold` default only prevents
+  action for labels without a rule; it does not validate the part is present.
+- **The dashboard was not exercised against a live camera or real run.** Its
+  data source was tested against synthetic artifacts and a temporary SQLite run
+  snapshot. Live frames fall back to a labelled placeholder when the camera is
+  unavailable or busy.
+- **The dashboard `Software stop` is not an emergency stop.** It sends a
+  software command only; it does not cut servo power. Use a physical e-stop.
+- **Provider circuit state needs opt-in telemetry.** Runs launched from the
+  dashboard set `ROUTER_TELEMETRY_PATH` automatically. For externally started
+  runs, set it to the same JSONL path or the circuit state shows `unknown`.
 
 ## Quickstart (Windows PowerShell)
 
@@ -219,6 +338,10 @@ Docker, broker, real-model and hardware commands are documented in
   environment labels.
 - [docs/device_protocol.md](docs/device_protocol.md) and
   [docs/hardware.md](docs/hardware.md) — serial protocol and hardware safety.
+- [docs/model_card.md](docs/model_card.md) — Phase 6 evaluation template; it is
+  overwritten by `training/evaluate.py` after a real run.
+- [docs/UI.md](docs/UI.md) — dashboard APIs, demo mode, token/bind rules and
+  live-run controls.
 
 ## License
 

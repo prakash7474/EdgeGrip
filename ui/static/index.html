@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EdgeGrip dashboard</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-demo="<!--DEMO_STATE-->">
+  <a class="skip-link" href="#main">Skip to dashboard content</a>
+  <!--DEMO_BANNER-->
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">EG</span>
+      <div>
+        <h1>EdgeGrip</h1>
+        <p class="subtitle">Edge/cloud inference control room</p>
+      </div>
+    </div>
+    <div class="topbar-status">
+      <span id="env-pill" class="pill" role="status">environment: …</span>
+      <span id="run-pill" class="pill" role="status">run: idle</span>
+      <button id="auth-button" class="button ghost" type="button" hidden>Unlock token</button>
+      <span id="connection" class="connection" role="status">connecting…</span>
+    </div>
+  </header>
+
+  <main id="main" class="dashboard" tabindex="-1">
+    <section class="panel live-panel" aria-labelledby="live-title">
+      <div class="panel-head">
+        <h2 id="live-title">Live view</h2>
+        <span id="frame-status" class="muted">polling frame…</span>
+      </div>
+      <div class="frame-wrap">
+        <img id="live-frame" alt="Latest camera frame with the prediction and score overlay">
+      </div>
+      <p id="prediction-line" class="prediction" role="status">No prediction yet.</p>
+    </section>
+
+    <section class="panel providers-panel" aria-labelledby="providers-title">
+      <div class="panel-head">
+        <h2 id="providers-title">Providers</h2>
+        <span class="muted">health · EWMA · circuit</span>
+      </div>
+      <div id="providers" class="providers"></div>
+    </section>
+
+    <section class="panel chart-panel" aria-labelledby="latency-title">
+      <div class="panel-head">
+        <h2 id="latency-title">Latency</h2>
+        <span class="muted">recent points, ms</span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="latency-chart" role="img" aria-label="Latency over time with p50, p95 and p99 reference lines"></canvas>
+      </div>
+      <p id="latency-summary" class="metric-row" aria-live="polite">No latency points.</p>
+    </section>
+
+    <section class="panel counts-panel" aria-labelledby="counts-title">
+      <div class="panel-head">
+        <h2 id="counts-title">Counts</h2>
+        <span class="muted">run artifacts</span>
+      </div>
+      <div id="counts" class="count-grid"></div>
+    </section>
+
+    <section class="panel events-panel" aria-labelledby="events-title">
+      <div class="panel-head">
+        <h2 id="events-title">Event log</h2>
+        <span class="muted">newest first</span>
+      </div>
+      <div id="events" class="events" role="log" aria-live="polite" aria-relevant="additions"></div>
+    </section>
+
+    <section class="panel controls-panel" aria-labelledby="controls-title">
+      <div class="panel-head">
+        <h2 id="controls-title">Controls</h2>
+        <span class="muted">validated parameters only</span>
+      </div>
+
+      <form id="run-form" class="run-form">
+        <label>Source
+          <select id="run-source" name="source">
+            <option value="camera">camera</option>
+            <option value="images">images (smoke test)</option>
+          </select>
+        </label>
+        <label>FPS
+          <input id="run-fps" name="fps" type="number" min="0.1" max="30" step="0.1" value="2">
+        </label>
+        <label>Deadline (ms)
+          <input id="run-deadline" name="deadline_ms" type="number" min="100" max="60000" step="100" value="8000">
+        </label>
+        <label>Duration (s)
+          <input id="run-duration" name="duration" type="number" min="1" max="3600" step="1" value="60">
+        </label>
+        <label>Camera index
+          <input id="run-camera" name="camera" type="number" min="0" max="16" step="1" value="0">
+        </label>
+        <label class="wide">Provider endpoints (one per line, must end in /predict)
+          <textarea id="run-endpoints" name="endpoints" rows="2" placeholder="http://127.0.0.1:8001/predict"></textarea>
+        </label>
+        <div class="button-row wide">
+          <button id="run-start" class="button primary" type="submit">Start run</button>
+          <button id="run-stop" class="button" type="button">Stop run</button>
+        </div>
+      </form>
+
+      <div class="control-block">
+        <h3>Local mock faults</h3>
+        <div class="mock-controls">
+          <label>Mock provider
+            <select id="mock-provider"></select>
+          </label>
+          <button id="mock-fail" class="button" type="button">Force fail</button>
+          <button id="mock-slow" class="button" type="button">Force slow</button>
+          <button id="mock-reset" class="button" type="button">Reset</button>
+        </div>
+        <p class="muted">Only loopback mock providers configured at startup are accepted.</p>
+      </div>
+
+      <div class="control-block danger-block">
+        <h3>Actuator</h3>
+        <button id="actuator-stop" class="button danger" type="button">Software stop</button>
+        <p class="muted">This is a software stop, <strong>not an emergency stop</strong>. It does not replace a physical e-stop that cuts servo power.</p>
+      </div>
+
+      <p id="control-message" class="control-message" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <dialog id="auth-dialog" aria-labelledby="auth-title">
+    <form method="dialog" id="auth-form">
+      <h2 id="auth-title">API token required</h2>
+      <p>This dashboard is bound beyond loopback. Enter the same <code>X-API-Token</code> used by the real server. The token is kept in this tab only and is never written to the page.</p>
+      <label>Token
+        <input id="auth-token" type="password" autocomplete="off" required>
+      </label>
+      <div class="button-row">
+        <button class="button primary" value="save" type="submit">Unlock</button>
+        <button class="button" value="cancel" type="button" id="auth-cancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

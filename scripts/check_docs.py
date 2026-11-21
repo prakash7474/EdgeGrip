@@ -28,6 +28,7 @@ SPECIAL_PREFIXES = (
     ("test_circuit_breaker", "TC3-unit"),
     ("test_health_thread", "TC3-unit"),
     ("test_tc5b_sim", "TC5b-sim"),
+    ("test_ui_", "UI"),
     ("test_capture_to_ack", "TC5b-live"),
     ("test_actuation_csv", "TC5b-live"),
     ("test_real_", "REAL-MODEL"),
